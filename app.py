@@ -210,6 +210,38 @@ MAX_PAGE_TREE_DEPTH = 64
 DEFAULT_MEDIA_BOX = [0.0, 0.0, 612.0, 792.0]  # US Letter
 
 
+def unlock_pdf(pdf_reader, password=None):
+    """Authenticate an encrypted PDF so its strings and streams can be read.
+
+    Nothing used to call this, so the first read of an encrypted object raised
+    "PdfKeyNotAvailableError: No key available to decrypt, please authenticate
+    first." The confusing part for users is that such a document opens in any
+    viewer without a prompt: publishers routinely encrypt with an owner
+    password only, to restrict printing or copying, leaving the user password
+    empty. The file is still encrypted, and the key still has to be derived
+    before any content can be read.
+
+    So an empty password is tried first, which covers that whole class without
+    bothering anybody. Raises ValueError with a message meant for the user when
+    the document genuinely needs one.
+    """
+    if pdf_reader.security_handler is None:
+        return
+
+    from pyhanko.pdf_utils.crypt import AuthStatus
+
+    result = pdf_reader.decrypt(password if password is not None else '')
+    if result.status != AuthStatus.FAILED:
+        return
+
+    if password:
+        raise ValueError('Parola introdusa nu este corecta pentru acest PDF.')
+    raise ValueError(
+        'Acest PDF este protejat cu parola si nu poate fi deschis pentru '
+        'semnare. Deschideti-l cu parola si salvati o copie fara protectie, '
+        'apoi incercati din nou.')
+
+
 def get_page_media_box(pdf_reader, page_ix):
     """MediaBox of page `page_ix`, walking the page tree and honouring inheritance.
 
@@ -228,9 +260,13 @@ def get_page_media_box(pdf_reader, page_ix):
     for _ in range(MAX_PAGE_TREE_DEPTH):
         if node is None:
             break
+        # get_object() throughout: in an encrypted document a lookup returns a
+        # proxy standing in for the decrypted value, and iterating that raised
+        # "TypeError: 'DecryptedObjectProxy' object is not iterable". It is a
+        # no-op on a direct object, so it costs nothing to always resolve.
         box = node.get('/MediaBox')
         if box is not None:
-            return [float(v) for v in box]
+            return [float(v.get_object()) for v in box.get_object()]
         parent = node.get('/Parent')
         node = parent.get_object() if parent is not None else None
 
@@ -290,13 +326,30 @@ def document_has_signature(pdf_reader):
         acro = pdf_reader.root.get('/AcroForm')
         if acro is None:
             return False
-        for ref in acro.get_object().get('/Fields', []):
+        # get_object() on every hop. In an encrypted document these come back
+        # as proxies for the decrypted value, and the bare forms silently
+        # failed: iterating the proxy raised, the except below turned that
+        # into False, and the guard stopped guarding on exactly the documents
+        # it was written for.
+        fields = acro.get_object().get('/Fields')
+        for ref in (fields.get_object() if fields is not None else []):
             field = ref.get_object()
-            if field.get('/FT') == '/Sig' and field.get('/V') is not None:
+            field_type = field.get('/FT')
+            value = field.get('/V')
+            if field_type is not None:
+                field_type = field_type.get_object()
+            if field_type == '/Sig' and value is not None:
                 return True
     except Exception:
         return False
     return False
+
+
+def get_page_count(pdf_reader):
+    """Number of pages, resolved through any decryption proxy."""
+    pages = pdf_reader.root['/Pages'].get_object()
+    count = pages.get('/Count', 0)
+    return int(count.get_object() if count is not None else 0)
 
 
 # DejaVu Sans covers every Romanian letter, in both the correct comma-below
@@ -710,9 +763,17 @@ def api_sign_pdf():
         # Prepare PDF writer (allow hybrid xref PDFs)
         from pyhanko.pdf_utils.reader import PdfFileReader
         pdf_reader = PdfFileReader(pdf_input, strict=False)
+
+        # Before anything reads page content. Most encrypted documents carry
+        # only an owner password and unlock silently; the rest need telling.
+        try:
+            unlock_pdf(pdf_reader, password=request.form.get('pdf_password') or None)
+        except ValueError as e:
+            return jsonify({'error': str(e), 'needs_password': True}), 400
+
         pdf_writer = IncrementalPdfFileWriter.from_reader(pdf_reader)
 
-        page_count = int(pdf_reader.root['/Pages'].get('/Count', 0))
+        page_count = get_page_count(pdf_reader)
 
         # Add signature field if visible
         if visible:
