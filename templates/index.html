@@ -187,6 +187,65 @@
             flex: 1;
             overflow-y: auto;
             padding: 10px;
+            min-height: 0;   /* let the About panel keep its place when the list is long */
+        }
+
+        .about-panel {
+            flex-shrink: 0;
+            padding: 12px 15px 14px;
+            border-top: 1px solid rgba(255,255,255,0.1);
+            background: rgba(255,255,255,0.02);
+        }
+
+        .about-title {
+            font-size: 10px;
+            letter-spacing: 0.08em;
+            text-transform: uppercase;
+            color: #00d4ff;
+            margin-bottom: 6px;
+        }
+
+        .about-name {
+            font-size: 13px;
+            font-weight: 600;
+            color: #e8e8f0;
+            margin-bottom: 8px;
+        }
+
+        .about-links {
+            display: flex;
+            flex-direction: column;
+            gap: 5px;
+        }
+
+        .about-links a {
+            display: flex;
+            align-items: center;
+            gap: 7px;
+            font-size: 11.5px;
+            color: #9a9aad;
+            text-decoration: none;
+            transition: color 0.2s;
+            min-width: 0;
+        }
+
+        /* Fixed box + currentColor keeps all four icons optically identical
+           and lets them pick up the hover colour. */
+        .about-icon {
+            width: 13px;
+            height: 13px;
+            flex-shrink: 0;
+            display: block;
+        }
+
+        .about-links a span {
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+
+        .about-links a:hover {
+            color: #00d4ff;
         }
 
         .file-item {
@@ -300,6 +359,63 @@
         .page-info {
             color: #888;
             font-size: 14px;
+        }
+
+        .page-info #page-input {
+            width: 44px;
+            padding: 3px 4px;
+            margin: 0 2px;
+            text-align: center;
+            font-size: 14px;
+            color: #fff;
+            background: rgba(255, 255, 255, 0.07);
+            border: 1px solid rgba(255, 255, 255, 0.15);
+            border-radius: 4px;
+        }
+
+        .page-info #page-input:focus {
+            outline: none;
+            border-color: #00d4ff;
+        }
+
+        .btn-all-pages {
+            margin-left: 16px;
+            padding: 5px 12px;
+            font-size: 13px;
+            color: #00d4ff;
+            background: rgba(0, 212, 255, 0.1);
+            border: 1px solid rgba(0, 212, 255, 0.35);
+            border-radius: 6px;
+            cursor: pointer;
+        }
+
+        .btn-all-pages:hover:not(:disabled) {
+            background: rgba(0, 212, 255, 0.2);
+        }
+
+        .btn-all-pages:disabled {
+            opacity: 0.3;
+            cursor: not-allowed;
+        }
+
+        .btn-clear-boxes {
+            margin-left: 8px;
+            padding: 5px 12px;
+            font-size: 13px;
+            color: #ff6464;
+            background: rgba(255, 100, 100, 0.1);
+            border: 1px solid rgba(255, 100, 100, 0.35);
+            border-radius: 6px;
+            cursor: pointer;
+        }
+
+        .btn-clear-boxes:hover:not(:disabled) {
+            background: rgba(255, 100, 100, 0.2);
+        }
+
+        .btn-clear-boxes:disabled {
+            opacity: 0.3;
+            cursor: not-allowed;
         }
 
         .zoom-controls {
@@ -856,16 +972,67 @@
             <div class="file-list" id="file-list">
                 <!-- Files will be listed here -->
             </div>
+            <div class="about-panel">
+                <div class="about-title">About</div>
+                <div class="about-name">Adrian B.</div>
+                <div class="about-links">
+                    <!-- Inline SVG rather than emoji: emoji render at wildly different
+                         sizes and force their own colour, so the row looked ragged. -->
+                    <a href="#" onclick="openExternal('email'); return false;" title="contact@plixco.ro">
+                        <svg class="about-icon" viewBox="0 0 16 16" aria-hidden="true">
+                            <rect x="1.2" y="3.2" width="13.6" height="9.6" rx="1.4"
+                                  fill="none" stroke="currentColor" stroke-width="1.4"/>
+                            <path d="M1.9 4.5 8 9l6.1-4.5" fill="none" stroke="currentColor"
+                                  stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/>
+                        </svg>
+                        <span>contact@plixco.ro</span>
+                    </a>
+                    <a href="#" onclick="openExternal('website'); return false;" title="https://plixco.ro">
+                        <svg class="about-icon" viewBox="0 0 16 16" aria-hidden="true">
+                            <circle cx="8" cy="8" r="6.3" fill="none" stroke="currentColor" stroke-width="1.4"/>
+                            <ellipse cx="8" cy="8" rx="2.7" ry="6.3" fill="none" stroke="currentColor" stroke-width="1.4"/>
+                            <path d="M2.1 5.9h11.8M2.1 10.1h11.8" fill="none" stroke="currentColor" stroke-width="1.4"/>
+                        </svg>
+                        <span>plixco.ro</span>
+                    </a>
+                    <a href="#" onclick="openExternal('github'); return false;" title="https://github.com/sudondream">
+                        <svg class="about-icon" viewBox="0 0 16 16" aria-hidden="true">
+                            <path fill="currentColor" d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82a7.6 7.6 0 0 1 2-.27c.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0 0 16 8c0-4.42-3.58-8-8-8Z"/>
+                        </svg>
+                        <span>github.com/sudondream</span>
+                    </a>
+                    <a href="#" onclick="openExternal('linkedin'); return false;" title="https://www.linkedin.com/in/sudondream/">
+                        <svg class="about-icon" viewBox="0 0 16 16" aria-hidden="true">
+                            <path fill="currentColor" d="M3.6 5.9H1V15h2.6V5.9ZM2.3 1.2a1.5 1.5 0 1 0 0 3 1.5 1.5 0 0 0 0-3ZM15 9.8c0-2.4-1.3-3.5-3-3.5-1.4 0-2 .77-2.35 1.3V5.9H7.05c.03.73 0 9.1 0 9.1h2.6V9.95c0-.23.02-.47.09-.64.19-.47.62-.95 1.34-.95.94 0 1.32.72 1.32 1.77V15H15V9.8Z"/>
+                        </svg>
+                        <span>linkedin.com/in/sudondream</span>
+                    </a>
+                </div>
+            </div>
         </div>
 
         <!-- Center Panel - Preview -->
         <div class="center-panel">
             <div class="preview-toolbar" id="preview-toolbar" style="display: none;">
                 <div class="page-nav">
+                    <button onclick="firstPage()" id="first-btn" title="First page">&#9198;</button>
                     <button onclick="prevPage()" id="prev-btn">&#9664;</button>
-                    <span class="page-info">Page <span id="page-num">1</span> of <span id="page-count">1</span></span>
+                    <span class="page-info">Page
+                        <input type="text" id="page-input" value="1" inputmode="numeric"
+                               onchange="commitPageInput()" onblur="commitPageInput()"
+                               onkeydown="if(event.key==='Enter'){event.preventDefault();this.blur();}">
+                        of <span id="page-count">1</span></span>
                     <button onclick="nextPage()" id="next-btn">&#9654;</button>
+                    <button onclick="lastPage()" id="last-btn" title="Last page">&#9197;</button>
                 </div>
+                <button class="btn-all-pages" id="all-pages-btn" onclick="applyBoxToAllPages()"
+                        title="Copy this page's signature box to every page">
+                    Apply to all pages
+                </button>
+                <button class="btn-clear-boxes" id="clear-boxes-btn" onclick="clearAllBoxes()"
+                        title="Remove every signature box from this document">
+                    Clear all
+                </button>
                 <div class="zoom-controls">
                     <button onclick="zoomOut()">-</button>
                     <span id="zoom-level">100%</span>
@@ -1013,6 +1180,7 @@
         let pdfDoc = null;
         let currentPage = 1;
         let totalPages = 0;
+        let pageSizes = [];   // unscaled {width, height} per page, PDF points
         let scale = 1.0;
         let signatureBoxes = {};
         let availableSlots = [
@@ -1024,6 +1192,20 @@
 
         // Settings
         const DEFAULT_PKCS11_PATH = '/Library/Application Support/com.idemia.idplug/lib/libidplug-pkcs11.2.7.0.dylib';
+
+        // Open an About link in the real browser. A plain <a href> would make
+        // pywebview navigate the app window itself, replacing the signer UI.
+        async function openExternal(key) {
+            try {
+                await fetch('/api/open-external', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({key: key})
+                });
+            } catch (e) {
+                console.error('Could not open link:', e);
+            }
+        }
 
         function getPkcs11Path() {
             return localStorage.getItem('pkcs11_path') || DEFAULT_PKCS11_PATH;
@@ -1200,6 +1382,14 @@
                 pdfDoc = await pdfjsLib.getDocument({data: data}).promise;
                 totalPages = pdfDoc.numPages;
                 currentPage = 1;
+
+                // Unscaled page sizes in PDF points, so "apply to all pages" can
+                // clamp each box against the real geometry of its target page.
+                pageSizes = [];
+                for (let p = 1; p <= totalPages; p++) {
+                    const vp = (await pdfDoc.getPage(p)).getViewport({scale: 1});
+                    pageSizes.push({width: vp.width, height: vp.height});
+                }
 
                 document.getElementById('no-preview').style.display = 'none';
                 document.getElementById('canvas-wrapper').style.display = 'block';
@@ -1465,11 +1655,109 @@
             }
         }
 
+        function goToPage(n) {
+            const target = Math.min(Math.max(parseInt(n, 10), 1), totalPages);
+            if (!Number.isFinite(target) || target === currentPage) {
+                updatePageNav();   // snap the input back to reality
+                return;
+            }
+            currentPage = target;
+            renderPage(currentPage);
+            updatePageNav();
+        }
+
+        function firstPage() { goToPage(1); }
+        function lastPage() { goToPage(totalPages); }
+
+        function commitPageInput() {
+            goToPage(document.getElementById('page-input').value);
+        }
+
         function updatePageNav() {
-            document.getElementById('page-num').textContent = currentPage;
+            document.getElementById('page-input').value = currentPage;
             document.getElementById('page-count').textContent = totalPages;
+            document.getElementById('first-btn').disabled = currentPage <= 1;
             document.getElementById('prev-btn').disabled = currentPage <= 1;
             document.getElementById('next-btn').disabled = currentPage >= totalPages;
+            document.getElementById('last-btn').disabled = currentPage >= totalPages;
+            updateAllPagesButton();
+        }
+
+        // Keep a box inside its target page. Mirrors clamp_box() in app.py; the
+        // backend re-clamps authoritatively, this is so the preview matches.
+        const BOX_MARGIN = 4;
+
+        function clampBoxToPage(box, pageSize) {
+            const maxX = pageSize.width - box.width - BOX_MARGIN;
+            const maxY = pageSize.height - box.height - BOX_MARGIN;
+            return {
+                x: maxX < BOX_MARGIN ? BOX_MARGIN : Math.min(Math.max(box.x, BOX_MARGIN), maxX),
+                y: maxY < BOX_MARGIN ? BOX_MARGIN : Math.min(Math.max(box.y, BOX_MARGIN), maxY),
+            };
+        }
+
+        function boxesOnCurrentPage() {
+            return (signatureBoxes[selectedFileIndex] || []).filter(b => b.page === currentPage);
+        }
+
+        function updateAllPagesButton() {
+            const btn = document.getElementById('all-pages-btn');
+            if (btn) btn.disabled = totalPages < 2 || boxesOnCurrentPage().length === 0;
+
+            const clearBtn = document.getElementById('clear-boxes-btn');
+            if (clearBtn) {
+                const count = (signatureBoxes[selectedFileIndex] || []).length;
+                clearBtn.disabled = count === 0;
+                clearBtn.textContent = count > 1 ? `Clear all (${count})` : 'Clear all';
+            }
+        }
+
+        function clearAllBoxes() {
+            const boxes = signatureBoxes[selectedFileIndex] || [];
+            if (boxes.length === 0) return;
+
+            // Only worth confirming when it would undo more than a single box.
+            if (boxes.length > 1 &&
+                !confirm(`Remove all ${boxes.length} signature boxes from this document?`)) {
+                return;
+            }
+
+            signatureBoxes[selectedFileIndex] = [];
+            renderSignatureBoxes();
+            renderFileList();
+            updateSigBoxesInfo();
+            updateSignButton();
+            updatePageNav();
+        }
+
+        function applyBoxToAllPages() {
+            const sources = boxesOnCurrentPage();
+            if (sources.length === 0 || totalPages < 2) return;
+
+            // The box the user drew stays first in the list - the backend treats
+            // index 0 as the one real signature field and the rest as stamps.
+            const kept = (signatureBoxes[selectedFileIndex] || [])
+                .filter(b => b.page === currentPage);
+            const replicated = [];
+
+            for (let p = 1; p <= totalPages; p++) {
+                if (p === currentPage) continue;
+                const size = pageSizes[p - 1];
+                sources.forEach(src => {
+                    const pos = size ? clampBoxToPage(src, size) : {x: src.x, y: src.y};
+                    replicated.push({
+                        page: p, x: pos.x, y: pos.y,
+                        width: src.width, height: src.height,
+                    });
+                });
+            }
+
+            signatureBoxes[selectedFileIndex] = kept.concat(replicated);
+            renderSignatureBoxes();
+            renderFileList();
+            updateSigBoxesInfo();
+            updateSignButton();
+            updatePageNav();
         }
 
         // Zoom
@@ -1487,6 +1775,7 @@
 
         function updateSigBoxesInfo() {
             const info = document.getElementById('sig-boxes-info');
+            updateAllPagesButton();
 
             if (files.length === 0) {
                 info.innerHTML = 'No files uploaded yet.';
@@ -1593,9 +1882,9 @@
 
             try {
                 const pkcs11Path = getPkcs11Path();
-                // Add client-side timeout (10 seconds) in case server hangs
+                // Add client-side timeout (30 seconds) — PKCS#11 slot enumeration can be slow
                 const controller = new AbortController();
-                const timeoutId = setTimeout(() => controller.abort(), 10000);
+                const timeoutId = setTimeout(() => controller.abort(), 30000);
 
                 const response = await fetch('/api/slots?pkcs11_path=' + encodeURIComponent(pkcs11Path), {
                     signal: controller.signal
@@ -1651,12 +1940,12 @@
 
         function startCardDetection() {
             detectCard();
-            // Poll every 5 seconds until card found
+            // Poll every 15 seconds until card found (slot query takes ~8s)
             cardDetectionInterval = setInterval(() => {
-                if (!cardFound) {
+                if (!cardFound && !isDetecting) {
                     detectCard();
                 }
-            }, 5000);
+            }, 15000);
         }
 
         // Wizard functions
@@ -1678,6 +1967,9 @@
             const downloadBtn = document.getElementById('download-btn');
             downloadBtn.disabled = false;
             downloadBtn.textContent = 'Download Signed Files';
+            downloadBtn.style.display = '';
+            const successIconReset = document.querySelector('#signing-complete .success-icon');
+            if (successIconReset) successIconReset.textContent = '✅';
 
             // Populate slot select and preselect slot 2 (signing slot) or first available
             const select = document.getElementById('slot-select');
@@ -1837,6 +2129,9 @@
             document.getElementById('signing-progress').style.display = 'none';
             document.getElementById('signing-complete').style.display = 'block';
 
+            const successIcon = document.querySelector('#signing-complete .success-icon');
+            const dlBtn = document.getElementById('download-btn');
+
             if (errors.length > 0) {
                 showWizardError(3, errors.join('\n'));
                 document.getElementById('complete-text').textContent =
@@ -1846,11 +2141,27 @@
                     `All ${signedFiles.length} document${signedFiles.length > 1 ? 's' : ''} signed successfully!`;
             }
 
+            // Nothing signed: don't show a success tick or offer a download that
+            // would only produce an empty archive.
+            if (signedFiles.length === 0) {
+                if (successIcon) successIcon.textContent = '❌';
+                dlBtn.style.display = 'none';
+            } else {
+                if (successIcon) successIcon.textContent = '✅';
+                dlBtn.style.display = '';
+            }
+
             updateSignButton();
         }
 
         async function downloadSignedFiles() {
             const btn = document.getElementById('download-btn');
+
+            if (signedFiles.length === 0) {
+                alert('No signed documents to save - all documents failed to sign.');
+                return;
+            }
+
             btn.disabled = true;
             btn.textContent = 'Saving...';
 

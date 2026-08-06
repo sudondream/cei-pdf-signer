@@ -9,7 +9,6 @@ import os
 import threading
 import socket
 import time
-
 # Ensure we can find our modules when running as a bundled app
 if getattr(sys, 'frozen', False):
     # Running as bundled app
