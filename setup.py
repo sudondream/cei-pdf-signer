@@ -33,7 +33,6 @@ OPTIONS = {
         'flask_cors',
         'werkzeug',
         'jinja2',
-        'PyKCS11',
         'pyhanko',
         'pyhanko.sign',
         'pyhanko.pdf_utils',

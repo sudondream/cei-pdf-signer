@@ -19,14 +19,15 @@ from flask import Flask, render_template, request, jsonify, send_file
 from flask_cors import CORS
 from werkzeug.utils import secure_filename
 
-# PKCS#11 imports
+# PKCS#11 imports - python-pkcs11 talks to the card. PyKCS11 used to sit here
+# too; it is gone. Nothing called it after the switch, and its wildcard import
+# dumped ~200 CK* constants into this module's namespace.
 try:
-    import PyKCS11
-    from PyKCS11 import *
+    import pkcs11
     PKCS11_AVAILABLE = True
 except ImportError:
     PKCS11_AVAILABLE = False
-    print("Warning: PyKCS11 not installed. Install with: pip install PyKCS11")
+    print("Warning: python-pkcs11 not installed. Install with: pip install 'pyhanko[pkcs11]'")
 
 # PDF signing imports - using pyHanko for proper PKCS#11 ECDSA support
 try:
@@ -37,8 +38,6 @@ try:
     from pyhanko.stamp import TextStampStyle
     from pyhanko.pdf_utils.text import TextBoxStyle
     from pyhanko.pdf_utils.content import RawContent
-    import pkcs11
-    from pkcs11 import Mechanism
     PYHANKO_AVAILABLE = True
 except ImportError:
     PYHANKO_AVAILABLE = False
@@ -415,7 +414,7 @@ def api_slots():
         clear_slot_cache()
         return jsonify({'slots': [], 'error': 'No smart card detected. Please insert your CEI card.'})
 
-    if not PYHANKO_AVAILABLE:
+    if not PKCS11_AVAILABLE:
         return jsonify({'slots': [], 'error': 'python-pkcs11 not installed'})
 
     lib_path = get_pkcs11_lib_path(request.args.get('pkcs11_path'))
@@ -448,7 +447,7 @@ def api_slots():
 @app.route('/api/certificate', methods=['POST'])
 def api_get_certificate():
     """Get certificate from smart card using python-pkcs11"""
-    if not PYHANKO_AVAILABLE:
+    if not PKCS11_AVAILABLE:
         return jsonify({'error': 'python-pkcs11 not installed'}), 500
 
     data = request.json
@@ -529,8 +528,12 @@ def api_get_certificate():
 @app.route('/api/sign', methods=['POST'])
 def api_sign_pdf():
     """Sign a PDF document using pyHanko with PKCS#11"""
+    # Signing is the one path that needs both: pyHanko builds the PDF, and
+    # python-pkcs11 drives the card that produces the signature.
     if not PYHANKO_AVAILABLE:
         return jsonify({'error': 'pyHanko not installed'}), 500
+    if not PKCS11_AVAILABLE:
+        return jsonify({'error': 'python-pkcs11 not installed'}), 500
 
     # Get form data
     if 'pdf' not in request.files:
@@ -827,7 +830,7 @@ if __name__ == '__main__':
     print("CEI Web PDF Signer")
     print("="*60)
     print(f"\nPKCS#11 library: {get_pkcs11_lib_path()}")
-    print(f"PyKCS11 available: {PKCS11_AVAILABLE}")
+    print(f"python-pkcs11 available: {PKCS11_AVAILABLE}")
     print(f"pyHanko available: {PYHANKO_AVAILABLE}")
     print("\nOpen your browser and go to: http://localhost:5001")
     print("="*60 + "\n")

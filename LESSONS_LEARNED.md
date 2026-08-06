@@ -23,6 +23,10 @@
 - The old note "(This may not apply to python-pkcs11)" was the correct instinct. It doesn't.
 - PyKCS11 may still hang — untested since the switch to `python-pkcs11`. Do not
   generalize from it back to `python-pkcs11`.
+- **PyKCS11 was removed entirely on 2026-08-06.** No code had called it since the
+  switch; it survived only as an unused import, a `/api/status` flag and a bundled
+  dependency. Everything card-facing goes through `python-pkcs11`. A test fails the
+  build if it is imported or listed as a dependency again.
 
 ### Slot Enumeration Is Progressive and Nondeterministic
 - The Idemia driver discovers the card's applications **lazily**. Successive runs returned:
@@ -104,7 +108,7 @@
   - Slot 2: `ADVANCED SIGNATURE PIN` (Qualified Electronic Signature)
   - Slot 3: `QSCD PIN` (Qualified Signature Creation Device)
 - Slot enumeration (`get_slots()`) takes ~7.5 seconds even when it works.
-- **The Idemia PKCS#11 library poisons the PC/SC connection**: after any call to it via PyKCS11, even `opensc-tool` stops seeing the reader until re-plug. (This may not apply to python-pkcs11.)
+- **The Idemia PKCS#11 library poisons the PC/SC connection**: after any call to it via PyKCS11, even `opensc-tool` stops seeing the reader until re-plug. (Historical — observed via PyKCS11, which is no longer a dependency. Measured *not* to happen with python-pkcs11; see the correction above.)
 
 ### Card File Structure
 - **Not standard PKCS#15** — `pkcs15-tool` returns "Card is invalid or cannot be handled".
@@ -197,7 +201,7 @@
 ### What Doesn't Work (with CTK active)
 | Tool/Library | Level | Issue |
 |---|---|---|
-| PyKCS11 | PKCS#11 | Hangs indefinitely (unverified since the switch away from it) |
+| ~~PyKCS11~~ | PKCS#11 | Hung indefinitely. **Removed as a dependency 2026-08-06** — nothing called it |
 | ~~python-pkcs11~~ | PKCS#11 | **Corrected 2026-08-06: works fine with CTK alive.** Slot enum is slow/progressive, not blocked |
 | `pkcs11-tool` | PKCS#11 | Hangs indefinitely |
 | `pkcs15-tool` | OpenSC/PC/SC | "Card is invalid" (proprietary card) |

@@ -28,7 +28,6 @@ a = Analysis(
         'werkzeug',
         'jinja2',
         'jinja2.ext',
-        'PyKCS11',
         'pyhanko',
         'pyhanko.sign',
         'pyhanko.sign.signers',
