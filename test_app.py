@@ -517,6 +517,159 @@ class NoPyKCS11Tests(unittest.TestCase):
                         "python-pkcs11 is importable, so the flag must be True")
 
 
+def build_encrypted_pdf(owner_pass='owner-secret', user_pass=''):
+    """A one page PDF with standard security. Empty user_pass is the common case.
+
+    Insurers and banks routinely ship documents encrypted with an owner
+    password only. They open in any viewer with no prompt, so users have no
+    idea they are encrypted, but their strings and streams still have to be
+    decrypted before anything can be read.
+    """
+    from io import BytesIO
+    from pyhanko.pdf_utils.writer import PdfFileWriter
+    from pyhanko.pdf_utils import generic
+
+    writer = PdfFileWriter()
+    contents = writer.add_object(generic.StreamObject(stream_data=b'BT ET'))
+    writer.insert_page(generic.DictionaryObject({
+        generic.NameObject('/Type'): generic.NameObject('/Page'),
+        generic.NameObject('/MediaBox'): generic.ArrayObject(
+            map(generic.NumberObject, [0, 0, 595, 842])),
+        generic.NameObject('/Resources'): generic.DictionaryObject(),
+        generic.NameObject('/Contents'): contents,
+    }))
+    writer.encrypt(owner_pass=owner_pass, user_pass=user_pass)
+    buf = BytesIO()
+    writer.write(buf)
+    return buf.getvalue()
+
+
+class EncryptedPdfTests(unittest.TestCase):
+    """Encrypted PDFs must be unlocked before anything reads their content.
+
+    Reported as "PdfKeyNotAvailableError: No key available to decrypt, please
+    authenticate first." on an RCA renewal document. Nothing ever called
+    decrypt(), so the first read of an encrypted string or stream failed. The
+    document opened fine in a viewer, because it carried only an owner
+    password, which is why it looked like the app was at fault for no reason.
+    """
+
+    def _reader(self, data):
+        from io import BytesIO
+        from pyhanko.pdf_utils.reader import PdfFileReader
+        return PdfFileReader(BytesIO(data), strict=False)
+
+    def test_owner_password_only_is_unlocked_automatically(self):
+        """The common case: no user password, so no reason to ask the user."""
+        reader = self._reader(build_encrypted_pdf())
+        app_module.unlock_pdf(reader)
+        page = reader.find_page_for_modification(0)[0].get_object()
+        self.assertEqual(page.raw_get('/Contents').get_object().data, b'BT ET',
+                         "content stream must be readable once unlocked")
+
+    def test_unencrypted_pdf_is_left_alone(self):
+        reader = self._reader(build_nested_page_tree_pdf())
+        app_module.unlock_pdf(reader)  # must not raise
+
+    def test_real_user_password_reports_something_actionable(self):
+        """A genuinely password protected file needs a message, not a traceback."""
+        reader = self._reader(build_encrypted_pdf(user_pass='hunter2'))
+        with self.assertRaises(ValueError) as caught:
+            app_module.unlock_pdf(reader)
+        message = str(caught.exception).lower()
+        self.assertIn('parol', message,
+                      "the message has to tell the user it wants a password")
+
+    def test_supplied_password_unlocks_the_document(self):
+        reader = self._reader(build_encrypted_pdf(user_pass='hunter2'))
+        app_module.unlock_pdf(reader, password='hunter2')
+        page = reader.find_page_for_modification(0)[0].get_object()
+        self.assertEqual(page.raw_get('/Contents').get_object().data, b'BT ET')
+
+    def test_media_box_survives_decryption(self):
+        """Values read out of an encrypted document arrive wrapped.
+
+        In an encrypted file a dictionary lookup hands back a proxy standing in
+        for the decrypted object, so iterating it directly raised
+        "TypeError: 'DecryptedObjectProxy' object is not iterable" and the
+        signature never got placed. Separate from the missing decrypt() call,
+        and only reachable once that one is fixed.
+        """
+        reader = self._reader(build_encrypted_pdf())
+        app_module.unlock_pdf(reader)
+        self.assertEqual(app_module.get_page_media_box(reader, 0),
+                         [0.0, 0.0, 595.0, 842.0])
+
+    def test_existing_signature_is_still_detected_when_encrypted(self):
+        """The guard against stamping over a signature must not quietly lapse.
+
+        document_has_signature swallows exceptions and reports False, so once
+        an encrypted document made the field lookup raise, the guard silently
+        stopped guarding: the app would stamp page content on an already
+        signed file and invalidate the signature it was meant to protect.
+        """
+        from io import BytesIO
+        from pyhanko.pdf_utils.writer import PdfFileWriter
+        from pyhanko.pdf_utils import generic
+
+        def build(encrypt):
+            writer = PdfFileWriter()
+            writer.insert_page(generic.DictionaryObject({
+                generic.NameObject('/Type'): generic.NameObject('/Page'),
+                generic.NameObject('/MediaBox'): generic.ArrayObject(
+                    map(generic.NumberObject, [0, 0, 595, 842])),
+                generic.NameObject('/Resources'): generic.DictionaryObject(),
+            }))
+            field = writer.add_object(generic.DictionaryObject({
+                generic.NameObject('/FT'): generic.NameObject('/Sig'),
+                generic.NameObject('/T'): generic.TextStringObject('Signature1'),
+                generic.NameObject('/V'): generic.DictionaryObject({
+                    generic.NameObject('/Type'): generic.NameObject('/Sig'),
+                }),
+            }))
+            writer.root[generic.NameObject('/AcroForm')] = writer.add_object(
+                generic.DictionaryObject({
+                    generic.NameObject('/Fields'): generic.ArrayObject([field]),
+                }))
+            writer.update_root()
+            if encrypt:
+                writer.encrypt(owner_pass='owner-secret', user_pass='')
+            buf = BytesIO()
+            writer.write(buf)
+            return buf.getvalue()
+
+        plain = self._reader(build(encrypt=False))
+        self.assertTrue(app_module.document_has_signature(plain),
+                        "sanity: a signed document must be detected when unencrypted")
+
+        encrypted = self._reader(build(encrypt=True))
+        app_module.unlock_pdf(encrypted)
+        self.assertTrue(app_module.document_has_signature(encrypted),
+                        "encryption must not disable the existing-signature guard")
+
+    def test_page_count_is_readable_when_encrypted(self):
+        reader = self._reader(build_encrypted_pdf())
+        app_module.unlock_pdf(reader)
+        self.assertEqual(app_module.get_page_count(reader), 1)
+
+    def test_stamping_works_on_an_encrypted_document(self):
+        """End to end: the path that failed for the reporter."""
+        from io import BytesIO
+        from pyhanko.pdf_utils.incremental_writer import IncrementalPdfFileWriter
+
+        reader = self._reader(build_encrypted_pdf())
+        app_module.unlock_pdf(reader)
+        writer = IncrementalPdfFileWriter.from_reader(reader)
+        applied = app_module.apply_visual_stamps(
+            writer, reader,
+            [{'page': 1, 'x': 40, 'y': 40, 'width': 300, 'height': 90}],
+            1, 'ADRIAN BANCU', '2026-08-06 12:00')
+        self.assertEqual(applied, 1)
+        out = BytesIO()
+        writer.write(out)
+        self.assertTrue(out.getvalue().startswith(b'%PDF'))
+
+
 class RomanianDiacriticsTests(unittest.TestCase):
     """The signature appearance has to render Romanian names correctly.
 
