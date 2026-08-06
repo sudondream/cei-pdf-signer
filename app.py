@@ -10,6 +10,7 @@ import base64
 import tempfile
 import hashlib
 import subprocess
+import threading
 import time
 from datetime import datetime
 from pathlib import Path
@@ -58,6 +59,10 @@ CORS(app)
 app.config['MAX_CONTENT_LENGTH'] = 50 * 1024 * 1024  # 50MB max
 app.config['UPLOAD_FOLDER'] = tempfile.mkdtemp()
 
+# Ensure /usr/local/bin is in PATH (needed for opensc-tool in bundled app)
+if '/usr/local/bin' not in os.environ.get('PATH', ''):
+    os.environ['PATH'] = '/usr/local/bin:' + os.environ.get('PATH', '')
+
 # Default PKCS#11 library for Romanian CEI
 DEFAULT_PKCS11_LIB = "/Library/Application Support/com.idemia.idplug/lib/libidplug-pkcs11.2.7.0.dylib"
 
@@ -73,18 +78,301 @@ def get_pkcs11_lib_path(custom_path=None):
     return os.environ.get('PKCS11_LIB', DEFAULT_PKCS11_LIB)
 
 
-def kill_ctkd():
-    """Kill CryptoTokenKit daemon to release smart card reader.
-    macOS CTK grabs exclusive PC/SC access on card insertion,
-    blocking PKCS#11 access. Killing it forces release."""
-    for proc in ('ctkd', 'ctkahp'):
+# The Idemia driver discovers the card's applications progressively: a cold
+# get_slots() returns only slot 1, and slots 2 (ADVANCED SIGNATURE) and 3 (QSCD)
+# show up ~20s later. A single snapshot loses that race and reports "slot not found".
+SLOT_WAIT_TIMEOUT = 45.0
+SLOT_POLL_INTERVAL = 2.0
+
+
+def find_slot(lib, slot_id, timeout=SLOT_WAIT_TIMEOUT, poll_interval=SLOT_POLL_INTERVAL,
+              now=time.monotonic, sleep=time.sleep):
+    """Find a PKCS#11 slot by ID, re-enumerating while the driver warms up.
+
+    Returns (slot, seen_slot_ids). slot is None if it never appeared before the
+    timeout; seen_slot_ids is from the last enumeration, for the error message.
+    """
+    deadline = now() + timeout
+    seen = []
+    while True:
+        slots = lib.get_slots(token_present=True)
+        seen = [s.slot_id for s in slots]
+        for slot in slots:
+            if slot.slot_id == slot_id:
+                return slot, seen
+        if now() >= deadline:
+            return None, seen
+        sleep(poll_interval)
+
+
+# Enumerating the card's real slots has to outlast the same warm-up, but must
+# finish inside the frontend's 30s abort.
+SLOT_SETTLE_TIMEOUT = 20.0
+
+_slot_cache = {}          # lib_path -> [slot dicts]
+_slot_lock = threading.Lock()
+
+
+def clear_slot_cache():
+    """Forget cached slots - called when the card is no longer present."""
+    with _slot_lock:
+        _slot_cache.clear()
+
+
+def detect_reader():
+    """Return (reader_name, card_present) via PC/SC.
+
+    Instant, and works alongside CryptoTokenKit - unlike PKCS#11 enumeration,
+    which is slow. Used as a cheap gate before the expensive part.
+    """
+    result = subprocess.run(['opensc-tool', '--list-readers'],
+                            capture_output=True, text=True, timeout=10)
+    output = result.stdout.strip()
+    if not output or 'No smart card readers' in output:
+        return None, False
+
+    for line in output.split('\n'):
+        line = line.strip()
+        if not line or line.startswith('#') or line.startswith('Nr.'):
+            continue
+        parts = line.split(None, 3)  # nr, card_present, features, name
+        if len(parts) < 2:
+            continue
         try:
-            subprocess.run(['pkill', '-9', proc],
-                           capture_output=True, timeout=5)
+            slot_nr = int(parts[0])
+        except ValueError:
+            continue
+        if parts[1].lower() == 'yes':
+            name = parts[3] if len(parts) >= 4 else (
+                parts[2] if len(parts) >= 3 else f'Reader {slot_nr}')
+            return name, True
+
+    return None, False
+
+
+def enumerate_slots(lib, settle_timeout=SLOT_SETTLE_TIMEOUT, poll_interval=SLOT_POLL_INTERVAL,
+                    now=time.monotonic, sleep=time.sleep):
+    """List the card's real PKCS#11 slots with their token labels.
+
+    Polls until the slot set stops growing (two consecutive reads add nothing)
+    or settle_timeout expires, keeping the union of everything seen. The driver
+    reveals slots progressively and has been observed dropping one between
+    reads, so a single snapshot under-reports.
+    """
+    deadline = now() + settle_timeout
+    found = {}
+    stable = 0
+
+    while True:
+        try:
+            slots = lib.get_slots(token_present=True)
         except Exception:
-            pass
-    # Give PC/SC a moment to reclaim the reader
-    time.sleep(0.5)
+            slots = []
+
+        grew = False
+        for slot in slots:
+            if slot.slot_id in found:
+                continue
+            grew = True
+            try:
+                label = (slot.get_token().label or '').strip() or f'Slot {slot.slot_id}'
+            except Exception:
+                label = f'Slot {slot.slot_id}'
+            found[slot.slot_id] = label
+
+        if found and not grew:
+            stable += 1
+            if stable >= 2:
+                break
+        else:
+            stable = 0
+
+        if now() >= deadline:
+            break
+        sleep(poll_interval)
+
+    return [{'id': sid, 'label': found[sid]} for sid in sorted(found)]
+
+
+# Guard against /Parent cycles in malformed page trees.
+MAX_PAGE_TREE_DEPTH = 64
+DEFAULT_MEDIA_BOX = [0.0, 0.0, 612.0, 792.0]  # US Letter
+
+
+def get_page_media_box(pdf_reader, page_ix):
+    """MediaBox of page `page_ix`, walking the page tree and honouring inheritance.
+
+    Two traps this avoids:
+      * /Pages/Kids is a TREE, not a flat page list. Intermediate /Pages nodes
+        mean Kids[page_ix] is wrong - IndexError, or silently the wrong page.
+      * /MediaBox is an inheritable attribute. A page may carry none and take
+        its nearest ancestor's, so defaulting to Letter misplaces signatures
+        on A4 by ~50pt.
+
+    Raises pyhanko PdfError if page_ix is out of range; callers should range-check first.
+    """
+    page_ref, _resources = pdf_reader.find_page_for_modification(page_ix)
+    node = page_ref.get_object()
+
+    for _ in range(MAX_PAGE_TREE_DEPTH):
+        if node is None:
+            break
+        box = node.get('/MediaBox')
+        if box is not None:
+            return [float(v) for v in box]
+        parent = node.get('/Parent')
+        node = parent.get_object() if parent is not None else None
+
+    # /MediaBox is required by the spec, so reaching here means a broken file.
+    return list(DEFAULT_MEDIA_BOX)
+
+
+# Points kept between a stamp and the page edge when a box has to be slid inside.
+BOX_MARGIN = 4.0
+
+
+def clamp_box(x, y, width, height, media_box, margin=BOX_MARGIN):
+    """Slide a box (PDF coords, lower-left origin) inside the media box.
+
+    Returns the (possibly unchanged) lower-left corner. A box drawn on an A4
+    portrait page keeps its exact position on every other A4 portrait page; only
+    a page that is too small or the wrong orientation moves it. A box larger
+    than the page is pinned at the margin rather than pushed off the other side.
+    """
+    x0, y0, x1, y1 = (float(v) for v in media_box)
+    min_x, min_y = x0 + margin, y0 + margin
+    max_x, max_y = x1 - width - margin, y1 - height - margin
+
+    cx = min_x if max_x < min_x else min(max(x, min_x), max_x)
+    cy = min_y if max_y < min_y else min(max(y, min_y), max_y)
+    return cx, cy
+
+
+def resolve_box(pdf_reader, box, page_count):
+    """Frontend box -> (page_ix, x, y, width, height) in PDF coordinates.
+
+    The frontend measures from the top-left of the rendered page; PDF runs from
+    the bottom-left of the MediaBox. Result is clamped inside the target page.
+    """
+    page_ix = int(box.get('page', 1)) - 1
+    if page_ix < 0 or page_ix >= page_count:
+        raise ValueError(f'Signature box is on page {page_ix + 1}, but this document '
+                         f'has {page_count} page(s).')
+
+    width = float(box.get('width', 200))
+    height = float(box.get('height', 70))
+    media_box = get_page_media_box(pdf_reader, page_ix)
+
+    x = media_box[0] + float(box.get('x', 50))
+    y = media_box[3] - float(box.get('y', 50)) - height
+    x, y = clamp_box(x, y, width, height, media_box)
+    return page_ix, x, y, width, height
+
+
+def document_has_signature(pdf_reader):
+    """True if the PDF already carries a filled-in signature field.
+
+    Stamping writes to page content, which invalidates a pre-existing signature.
+    Merely appending a new signature field does not, so this only gates stamping.
+    """
+    try:
+        acro = pdf_reader.root.get('/AcroForm')
+        if acro is None:
+            return False
+        for ref in acro.get_object().get('/Fields', []):
+            field = ref.get_object()
+            if field.get('/FT') == '/Sig' and field.get('/V') is not None:
+                return True
+    except Exception:
+        return False
+    return False
+
+
+def build_stamp_style():
+    """The signature appearance, shared by the real field and the page stamps.
+
+    Both go through this so a stamped page looks identical to the signed one.
+    """
+    seal_graphic = RawContent(
+        box=None,
+        data=b'''
+        q
+        0.2 0.4 0.8 RG  % Blue stroke color
+        0.9 0.95 1 rg  % Light blue fill
+        2 w  % Line width
+        50 35 40 30 re S  % Outer rectangle
+        0.2 0.4 0.8 rg  % Blue fill for inner elements
+        % Draw decorative lines
+        15 60 m 135 60 l S  % Top line
+        15 10 m 135 10 l S  % Bottom line
+        Q
+        '''
+    )
+    return TextStampStyle(
+        stamp_text='DIGITALLY SIGNED\n%(signer)s\n%(ts)s',
+        text_box_style=TextBoxStyle(font_size=28),
+        border_width=3,
+        border_color=(0.2, 0.4, 0.8),
+        background=seal_graphic,
+        background_opacity=0.15,
+    )
+
+
+def get_signer_common_name(signer):
+    """CN from the signing certificate, for the stamp text."""
+    try:
+        return signer.signing_cert.subject.native.get('common_name') or 'Unknown'
+    except Exception:
+        return 'Unknown'
+
+
+def _ensure_page_contents(pdf_writer, page_ix):
+    """Give a page an empty /Contents stream if it has none.
+
+    A page with no /Contents is legal (an entirely blank page), but pyHanko's
+    add_stream_to_page does a raw_get('/Contents') and raises KeyError on it.
+    """
+    from pyhanko.pdf_utils import generic
+
+    page_ref, _ = pdf_writer.find_page_for_modification(page_ix)
+    page = page_ref.get_object()
+    if '/Contents' in page:
+        return
+
+    empty = pdf_writer.add_object(generic.StreamObject(stream_data=b''))
+    page[generic.NameObject('/Contents')] = empty
+    pdf_writer.update_container(page)
+
+
+def apply_visual_stamps(pdf_writer, pdf_reader, boxes, page_count,
+                        signer_name, timestamp=None):
+    """Draw a signature-lookalike stamp for each box. Returns how many were applied.
+
+    These are ordinary page content, not signature fields. Applied before
+    sign_pdf(), so the single real signature's byte range covers them - they
+    cannot be altered without invalidating it.
+    """
+    if not boxes:
+        return 0
+
+    from pyhanko.pdf_utils.layout import BoxConstraints
+    from pyhanko.stamp import TextStamp
+
+    style = build_stamp_style()
+    applied = 0
+    for box in boxes:
+        page_ix, x, y, width, height = resolve_box(pdf_reader, box, page_count)
+        _ensure_page_contents(pdf_writer, page_ix)
+        params = {'signer': signer_name}
+        if timestamp is not None:
+            params['ts'] = timestamp
+        TextStamp(
+            pdf_writer, style,
+            text_params=params,
+            box=BoxConstraints(width=width, height=height),
+        ).apply(page_ix, x, y)
+        applied += 1
+    return applied
 
 
 @app.route('/')
@@ -107,65 +395,61 @@ def api_status():
 
 @app.route('/api/slots')
 def api_slots():
-    """Detect available smart card slots"""
-    if not PKCS11_AVAILABLE:
-        return jsonify({'slots': [], 'error': 'PyKCS11 not installed'})
+    """Report the card's real PKCS#11 slots.
 
-    # Get custom path from query string if provided
-    custom_path = request.args.get('pkcs11_path')
-    lib_path = get_pkcs11_lib_path(custom_path)
-    if not os.path.exists(lib_path):
-        return jsonify({'slots': [], 'error': f'PKCS11 library not found at: {lib_path}'})
+    Cheap PC/SC presence check first, then actual slot enumeration. The result
+    is cached per library path, because enumeration costs ~8-20s on a cold
+    driver and the frontend polls this every 15s.
+    """
+    try:
+        reader_name, card_present = detect_reader()
+    except FileNotFoundError:
+        return jsonify({'slots': [], 'error': 'opensc-tool not found. Please install OpenSC.'})
+    except subprocess.TimeoutExpired:
+        return jsonify({'slots': [], 'error': 'Reader detection timed out.'})
+    except Exception as e:
+        return jsonify({'slots': [], 'error': f'Error: {str(e)}'})
 
-    last_error = None
-    for attempt in range(2):
+    if not card_present:
+        # Card pulled - drop the cache so the next insert re-enumerates.
+        clear_slot_cache()
+        return jsonify({'slots': [], 'error': 'No smart card detected. Please insert your CEI card.'})
+
+    if not PYHANKO_AVAILABLE:
+        return jsonify({'slots': [], 'error': 'python-pkcs11 not installed'})
+
+    lib_path = get_pkcs11_lib_path(request.args.get('pkcs11_path'))
+
+    # Serialize enumeration: a second concurrent poll should wait and then hit
+    # the cache rather than hammer the driver.
+    with _slot_lock:
+        cached = _slot_cache.get(lib_path)
+        if cached:
+            return jsonify({'slots': cached})
+
         try:
-            if attempt > 0:
-                # First attempt failed — kill CryptoTokenKit and retry
-                kill_ctkd()
-
-            lib = PyKCS11.PyKCS11Lib()
-            lib.load(lib_path)
-
-            # Get slots with tokens present (card inserted)
-            slots = lib.getSlotList(tokenPresent=True)
-
-            if not slots:
-                return jsonify({'slots': [], 'error': 'No smart card detected'})
-
-            slot_info = []
-            for slot_id in slots:
-                try:
-                    token_info = lib.getTokenInfo(slot_id)
-                    slot_info.append({
-                        'id': slot_id,
-                        'label': token_info.label.strip(),
-                        'model': token_info.model.strip(),
-                        'manufacturer': token_info.manufacturerID.strip(),
-                    })
-                except:
-                    slot_info.append({
-                        'id': slot_id,
-                        'label': f'Slot {slot_id}',
-                        'model': 'Unknown',
-                        'manufacturer': 'Unknown',
-                    })
-
-            return jsonify({'slots': slot_info})
-
-        except PyKCS11.PyKCS11Error as e:
-            last_error = f'Smart card error: {str(e)}'
+            slot_info = enumerate_slots(pkcs11.lib(lib_path))
         except Exception as e:
-            last_error = f'Error: {str(e)}'
+            return jsonify({'slots': [], 'error': f'Could not read card slots: {e}'})
 
-    return jsonify({'slots': [], 'error': last_error})
+        if not slot_info:
+            return jsonify({'slots': [], 'error':
+                            'Card detected but no PKCS#11 slots available. Re-seat the card and retry.'})
+
+        for slot in slot_info:
+            slot['model'] = reader_name or ''
+            slot['manufacturer'] = 'Idemia'
+
+        _slot_cache[lib_path] = slot_info
+
+    return jsonify({'slots': slot_info})
 
 
 @app.route('/api/certificate', methods=['POST'])
 def api_get_certificate():
-    """Get certificate from smart card"""
-    if not PKCS11_AVAILABLE:
-        return jsonify({'error': 'PyKCS11 not installed'}), 500
+    """Get certificate from smart card using python-pkcs11"""
+    if not PYHANKO_AVAILABLE:
+        return jsonify({'error': 'python-pkcs11 not installed'}), 500
 
     data = request.json
     if not data:
@@ -177,41 +461,28 @@ def api_get_certificate():
     if not pin:
         return jsonify({'error': 'PIN required'}), 400
 
+    session = None
     try:
         custom_path = data.get('pkcs11_path')
         lib_path = get_pkcs11_lib_path(custom_path)
-        lib = PyKCS11.PyKCS11Lib()
-        lib.load(lib_path)
+        lib = pkcs11.lib(lib_path)
 
-        # Check available slots first
-        available_slots = lib.getSlotList(tokenPresent=True)
-        if slot_id not in available_slots:
-            return jsonify({'error': f'Slot {slot_id} not available. Available slots: {available_slots}. Please click "Detect Smart Card" again.'}), 400
+        target_slot, available = find_slot(lib, slot_id)
+        if not target_slot:
+            return jsonify({'error': f'Slot {slot_id} not available. Available slots: {available}. Please click "Detect Smart Card" again.'}), 400
 
-        session = lib.openSession(slot_id, CKF_SERIAL_SESSION | CKF_RW_SESSION)
-        session.login(pin)
-        
+        token = target_slot.get_token()
+        session = token.open(user_pin=pin)
+
         # Find certificates
-        certs = session.findObjects([(CKA_CLASS, CKO_CERTIFICATE)])
-        
+        from pkcs11 import ObjectClass, Attribute
         cert_info = []
-        for cert in certs:
-            attrs = session.getAttributeValue(cert, [CKA_VALUE, CKA_LABEL])
-            cert_der = bytes(attrs[0])
-            # Handle label - might be string, bytes, or list of ints depending on PyKCS11 version
-            raw_label = attrs[1]
-            if not raw_label:
-                label = 'Unknown'
-            elif isinstance(raw_label, str):
-                label = raw_label
-            elif isinstance(raw_label, (bytes, bytearray)):
-                label = raw_label.decode('utf-8', errors='replace')
-            elif isinstance(raw_label, (list, tuple)) and raw_label and isinstance(raw_label[0], int):
-                label = ''.join(chr(c) for c in raw_label)
-            else:
-                label = str(raw_label)
-            
-            # Parse certificate if cryptography is available
+        for cert in session.get_objects({Attribute.CLASS: ObjectClass.CERTIFICATE}):
+            cert_der = bytes(cert[Attribute.VALUE])
+            label = cert.get(Attribute.LABEL, 'Unknown') or 'Unknown'
+            if isinstance(label, bytes):
+                label = label.decode('utf-8', errors='replace')
+
             try:
                 from cryptography import x509
                 from cryptography.hazmat.backends import default_backend
@@ -219,7 +490,7 @@ def api_get_certificate():
                 subject = cert_obj.subject.rfc4514_string()
                 issuer = cert_obj.issuer.rfc4514_string()
                 not_after = cert_obj.not_valid_after_utc.isoformat()
-                
+
                 cert_info.append({
                     'label': label,
                     'subject': subject,
@@ -227,34 +498,32 @@ def api_get_certificate():
                     'valid_until': not_after,
                     'der_base64': base64.b64encode(cert_der).decode('ascii')
                 })
-            except:
+            except Exception:
                 cert_info.append({
                     'label': label,
                     'der_base64': base64.b64encode(cert_der).decode('ascii')
                 })
-        
-        session.logout()
-        session.closeSession()
-        
+
         return jsonify({'certificates': cert_info})
-    
-    except PyKCS11.PyKCS11Error as e:
-        error_msg = str(e)
-        if 'CKR_PIN_INCORRECT' in error_msg:
-            return jsonify({'error': 'Incorrect PIN. Please check your PIN and try again.'}), 401
-        if 'CKR_PIN_LOCKED' in error_msg:
-            return jsonify({'error': 'PIN is locked. Too many incorrect attempts.'}), 401
-        if 'CKR_TOKEN_NOT_PRESENT' in error_msg:
-            return jsonify({'error': 'Smart card not detected. Please insert your CEI card.'}), 500
-        if 'CKR_SLOT_ID_INVALID' in error_msg:
-            return jsonify({'error': f'Invalid slot {slot_id}. Please click "Detect Smart Card" and select the correct slot.'}), 500
-        if 'CKR_USER_NOT_LOGGED_IN' in error_msg:
-            return jsonify({'error': 'Session expired. Please try again.'}), 500
-        return jsonify({'error': f'Smart card error: {error_msg}'}), 500
+
+    except pkcs11.exceptions.PinIncorrect:
+        return jsonify({'error': 'Incorrect PIN. Please check your PIN and try again.'}), 401
+    except pkcs11.exceptions.PinLocked:
+        return jsonify({'error': 'PIN is locked. Too many incorrect attempts.'}), 401
+    except pkcs11.exceptions.TokenNotPresent:
+        return jsonify({'error': 'Smart card not detected. Please insert your CEI card.'}), 500
+    except pkcs11.exceptions.SlotIDInvalid:
+        return jsonify({'error': f'Invalid slot {slot_id}. Please click "Detect Smart Card" and select the correct slot.'}), 500
     except Exception as e:
         import traceback
         traceback.print_exc()
         return jsonify({'error': f'Error: {str(e)}'}), 500
+    finally:
+        if session:
+            try:
+                session.close()
+            except Exception:
+                pass
 
 
 @app.route('/api/sign', methods=['POST'])
@@ -321,18 +590,11 @@ def api_sign_pdf():
 
         # Load PKCS#11 library and find the right slot
         lib = pkcs11.lib(lib_path)
-        slots = lib.get_slots(token_present=True)
 
-        # Find slot by ID - python-pkcs11 uses slot array, not slot IDs directly
-        target_slot = None
-        for slot in slots:
-            # The slot_id from frontend matches the PKCS#11 slot number
-            if slot.slot_id == slot_id:
-                target_slot = slot
-                break
-
+        target_slot, available = find_slot(lib, slot_id)
         if not target_slot:
-            return jsonify({'error': f'Slot {slot_id} not found'}), 400
+            return jsonify({'error': f'Slot {slot_id} not found. Available slots: {available}. '
+                                     f'Check that the card is fully seated in the reader.'}), 400
 
         # Open session with PIN
         token = target_slot.get_token()
@@ -359,54 +621,44 @@ def api_sign_pdf():
         pdf_reader = PdfFileReader(pdf_input, strict=False)
         pdf_writer = IncrementalPdfFileWriter.from_reader(pdf_reader)
 
+        page_count = int(pdf_reader.root['/Pages'].get('/Count', 0))
+
         # Add signature field if visible
         if visible:
-            # Get page dimensions to convert coordinates
-            # Frontend uses top-left origin, PDF uses bottom-left
-            page_obj = pdf_reader.root['/Pages']['/Kids'][sig_page]
-            media_box = page_obj.get('/MediaBox', [0, 0, 612, 792])
-            page_height = float(media_box[3]) - float(media_box[1])
-
-            # Convert Y coordinate from top-left to bottom-left origin
-            pdf_y = page_height - sig_y - sig_height
+            try:
+                sig_page, pdf_x, pdf_y, sig_width, sig_height = resolve_box(
+                    pdf_reader,
+                    {'page': sig_page + 1, 'x': sig_x, 'y': sig_y,
+                     'width': sig_width, 'height': sig_height},
+                    page_count,
+                )
+            except ValueError as e:
+                return jsonify({'error': str(e)}), 400
 
             sig_field_spec = SigFieldSpec(
                 sig_field_name='Signature1',
                 on_page=sig_page,
-                box=(sig_x, pdf_y, sig_x + sig_width, pdf_y + sig_height),
+                box=(pdf_x, pdf_y, pdf_x + sig_width, pdf_y + sig_height),
             )
             append_signature_field(pdf_writer, sig_field_spec)
 
-        # Create stamp background graphic (seal-like circle pattern)
-        # Using PDF drawing commands for a circular seal
-        seal_graphic = RawContent(
-            box=None,  # Will be set by the stamp
-            data=b'''
-            q
-            0.2 0.4 0.8 RG  % Blue stroke color
-            0.9 0.95 1 rg  % Light blue fill
-            2 w  % Line width
-            50 35 40 30 re S  % Outer rectangle
-            0.2 0.4 0.8 rg  % Blue fill for inner elements
-            % Draw decorative lines
-            15 60 m 135 60 l S  % Top line
-            15 10 m 135 10 l S  % Bottom line
-            Q
-            '''
-        )
+        # Every box after the first becomes a visual stamp. Only box 0 is a real
+        # signature field - one qualified signature covers the whole document,
+        # and because stamping happens before sign_pdf() the stamps fall inside
+        # its byte range and cannot be altered without invalidating it.
+        extra_boxes = signature_boxes[1:] if signature_boxes else []
+        if extra_boxes:
+            if document_has_signature(pdf_reader):
+                return jsonify({'error': 'This document already contains a signature. '
+                                         'Stamping every page would modify page content and '
+                                         'invalidate it. Keep a single signature box.'}), 400
+            try:
+                apply_visual_stamps(pdf_writer, pdf_reader, extra_boxes, page_count,
+                                    get_signer_common_name(signer))
+            except ValueError as e:
+                return jsonify({'error': str(e)}), 400
 
-        # Create stamp style with larger text and stamp-like appearance
-        text_style = TextBoxStyle(
-            font_size=28,  # Large font to fill the box
-        )
-        stamp_style = TextStampStyle(
-            stamp_text='DIGITALLY SIGNED\n%(signer)s\n%(ts)s',
-            text_box_style=text_style,
-            border_width=3,
-            border_color=(0.2, 0.4, 0.8),  # Blue border
-            background=seal_graphic,
-            background_opacity=0.15,  # Subtle background
-        )
+        stamp_style = build_stamp_style()
 
         # Create PdfSigner with stamp style
         pdf_signer = PdfSigner(
@@ -465,19 +717,30 @@ def api_sign_pdf():
                 pass
 
 
+DOWNLOADS_FOLDER = os.path.expanduser('~/Downloads')
+
+
+def reveal_in_finder(path):
+    """Open Finder with the given path selected."""
+    subprocess.run(['open', '-R', path], check=False)
+
+
 @app.route('/api/save-files', methods=['POST'])
 def api_save_files():
     """Save signed files to Downloads folder and open in Finder"""
-    import subprocess
     import zipfile
-    from io import BytesIO
 
     data = request.json
     if not data or 'files' not in data:
         return jsonify({'error': 'No files provided'}), 400
 
     files_data = data['files']
-    downloads_folder = os.path.expanduser('~/Downloads')
+    if not files_data:
+        # Never write a zero-entry ZIP - that just looks like a successful save
+        # of nothing. If we got here, every document failed to sign.
+        return jsonify({'error': 'No signed documents to save - all documents failed to sign.'}), 400
+
+    downloads_folder = DOWNLOADS_FOLDER
 
     try:
         saved_files = []
@@ -499,7 +762,7 @@ def api_save_files():
             saved_files.append(file_path)
 
             # Open Finder and select the file
-            subprocess.run(['open', '-R', file_path], check=False)
+            reveal_in_finder(file_path)
 
         else:
             # Multiple files - create ZIP
@@ -519,7 +782,7 @@ def api_save_files():
             saved_files.append(zip_path)
 
             # Open Finder and select the ZIP
-            subprocess.run(['open', '-R', zip_path], check=False)
+            reveal_in_finder(zip_path)
 
         return jsonify({
             'success': True,

@@ -302,6 +302,43 @@
             font-size: 14px;
         }
 
+        .page-info #page-input {
+            width: 44px;
+            padding: 3px 4px;
+            margin: 0 2px;
+            text-align: center;
+            font-size: 14px;
+            color: #fff;
+            background: rgba(255, 255, 255, 0.07);
+            border: 1px solid rgba(255, 255, 255, 0.15);
+            border-radius: 4px;
+        }
+
+        .page-info #page-input:focus {
+            outline: none;
+            border-color: #00d4ff;
+        }
+
+        .btn-all-pages {
+            margin-left: 16px;
+            padding: 5px 12px;
+            font-size: 13px;
+            color: #00d4ff;
+            background: rgba(0, 212, 255, 0.1);
+            border: 1px solid rgba(0, 212, 255, 0.35);
+            border-radius: 6px;
+            cursor: pointer;
+        }
+
+        .btn-all-pages:hover:not(:disabled) {
+            background: rgba(0, 212, 255, 0.2);
+        }
+
+        .btn-all-pages:disabled {
+            opacity: 0.3;
+            cursor: not-allowed;
+        }
+
         .zoom-controls {
             display: flex;
             align-items: center;
@@ -862,10 +899,20 @@
         <div class="center-panel">
             <div class="preview-toolbar" id="preview-toolbar" style="display: none;">
                 <div class="page-nav">
+                    <button onclick="firstPage()" id="first-btn" title="First page">&#9198;</button>
                     <button onclick="prevPage()" id="prev-btn">&#9664;</button>
-                    <span class="page-info">Page <span id="page-num">1</span> of <span id="page-count">1</span></span>
+                    <span class="page-info">Page
+                        <input type="text" id="page-input" value="1" inputmode="numeric"
+                               onchange="commitPageInput()" onblur="commitPageInput()"
+                               onkeydown="if(event.key==='Enter'){event.preventDefault();this.blur();}">
+                        of <span id="page-count">1</span></span>
                     <button onclick="nextPage()" id="next-btn">&#9654;</button>
+                    <button onclick="lastPage()" id="last-btn" title="Last page">&#9197;</button>
                 </div>
+                <button class="btn-all-pages" id="all-pages-btn" onclick="applyBoxToAllPages()"
+                        title="Copy this page's signature box to every page">
+                    Apply to all pages
+                </button>
                 <div class="zoom-controls">
                     <button onclick="zoomOut()">-</button>
                     <span id="zoom-level">100%</span>
@@ -1013,6 +1060,7 @@
         let pdfDoc = null;
         let currentPage = 1;
         let totalPages = 0;
+        let pageSizes = [];   // unscaled {width, height} per page, PDF points
         let scale = 1.0;
         let signatureBoxes = {};
         let availableSlots = [
@@ -1200,6 +1248,14 @@
                 pdfDoc = await pdfjsLib.getDocument({data: data}).promise;
                 totalPages = pdfDoc.numPages;
                 currentPage = 1;
+
+                // Unscaled page sizes in PDF points, so "apply to all pages" can
+                // clamp each box against the real geometry of its target page.
+                pageSizes = [];
+                for (let p = 1; p <= totalPages; p++) {
+                    const vp = (await pdfDoc.getPage(p)).getViewport({scale: 1});
+                    pageSizes.push({width: vp.width, height: vp.height});
+                }
 
                 document.getElementById('no-preview').style.display = 'none';
                 document.getElementById('canvas-wrapper').style.display = 'block';
@@ -1465,11 +1521,85 @@
             }
         }
 
+        function goToPage(n) {
+            const target = Math.min(Math.max(parseInt(n, 10), 1), totalPages);
+            if (!Number.isFinite(target) || target === currentPage) {
+                updatePageNav();   // snap the input back to reality
+                return;
+            }
+            currentPage = target;
+            renderPage(currentPage);
+            updatePageNav();
+        }
+
+        function firstPage() { goToPage(1); }
+        function lastPage() { goToPage(totalPages); }
+
+        function commitPageInput() {
+            goToPage(document.getElementById('page-input').value);
+        }
+
         function updatePageNav() {
-            document.getElementById('page-num').textContent = currentPage;
+            document.getElementById('page-input').value = currentPage;
             document.getElementById('page-count').textContent = totalPages;
+            document.getElementById('first-btn').disabled = currentPage <= 1;
             document.getElementById('prev-btn').disabled = currentPage <= 1;
             document.getElementById('next-btn').disabled = currentPage >= totalPages;
+            document.getElementById('last-btn').disabled = currentPage >= totalPages;
+            updateAllPagesButton();
+        }
+
+        // Keep a box inside its target page. Mirrors clamp_box() in app.py; the
+        // backend re-clamps authoritatively, this is so the preview matches.
+        const BOX_MARGIN = 4;
+
+        function clampBoxToPage(box, pageSize) {
+            const maxX = pageSize.width - box.width - BOX_MARGIN;
+            const maxY = pageSize.height - box.height - BOX_MARGIN;
+            return {
+                x: maxX < BOX_MARGIN ? BOX_MARGIN : Math.min(Math.max(box.x, BOX_MARGIN), maxX),
+                y: maxY < BOX_MARGIN ? BOX_MARGIN : Math.min(Math.max(box.y, BOX_MARGIN), maxY),
+            };
+        }
+
+        function boxesOnCurrentPage() {
+            return (signatureBoxes[selectedFileIndex] || []).filter(b => b.page === currentPage);
+        }
+
+        function updateAllPagesButton() {
+            const btn = document.getElementById('all-pages-btn');
+            if (!btn) return;
+            btn.disabled = totalPages < 2 || boxesOnCurrentPage().length === 0;
+        }
+
+        function applyBoxToAllPages() {
+            const sources = boxesOnCurrentPage();
+            if (sources.length === 0 || totalPages < 2) return;
+
+            // The box the user drew stays first in the list - the backend treats
+            // index 0 as the one real signature field and the rest as stamps.
+            const kept = (signatureBoxes[selectedFileIndex] || [])
+                .filter(b => b.page === currentPage);
+            const replicated = [];
+
+            for (let p = 1; p <= totalPages; p++) {
+                if (p === currentPage) continue;
+                const size = pageSizes[p - 1];
+                sources.forEach(src => {
+                    const pos = size ? clampBoxToPage(src, size) : {x: src.x, y: src.y};
+                    replicated.push({
+                        page: p, x: pos.x, y: pos.y,
+                        width: src.width, height: src.height,
+                    });
+                });
+            }
+
+            signatureBoxes[selectedFileIndex] = kept.concat(replicated);
+            renderSignatureBoxes();
+            renderFileList();
+            updateSigBoxesInfo();
+            updateSignButton();
+            updatePageNav();
         }
 
         // Zoom
@@ -1487,6 +1617,7 @@
 
         function updateSigBoxesInfo() {
             const info = document.getElementById('sig-boxes-info');
+            updateAllPagesButton();
 
             if (files.length === 0) {
                 info.innerHTML = 'No files uploaded yet.';
@@ -1593,9 +1724,9 @@
 
             try {
                 const pkcs11Path = getPkcs11Path();
-                // Add client-side timeout (10 seconds) in case server hangs
+                // Add client-side timeout (30 seconds) — PKCS#11 slot enumeration can be slow
                 const controller = new AbortController();
-                const timeoutId = setTimeout(() => controller.abort(), 10000);
+                const timeoutId = setTimeout(() => controller.abort(), 30000);
 
                 const response = await fetch('/api/slots?pkcs11_path=' + encodeURIComponent(pkcs11Path), {
                     signal: controller.signal
@@ -1651,12 +1782,12 @@
 
         function startCardDetection() {
             detectCard();
-            // Poll every 5 seconds until card found
+            // Poll every 15 seconds until card found (slot query takes ~8s)
             cardDetectionInterval = setInterval(() => {
-                if (!cardFound) {
+                if (!cardFound && !isDetecting) {
                     detectCard();
                 }
-            }, 5000);
+            }, 15000);
         }
 
         // Wizard functions
@@ -1678,6 +1809,9 @@
             const downloadBtn = document.getElementById('download-btn');
             downloadBtn.disabled = false;
             downloadBtn.textContent = 'Download Signed Files';
+            downloadBtn.style.display = '';
+            const successIconReset = document.querySelector('#signing-complete .success-icon');
+            if (successIconReset) successIconReset.textContent = '✅';
 
             // Populate slot select and preselect slot 2 (signing slot) or first available
             const select = document.getElementById('slot-select');
@@ -1837,6 +1971,9 @@
             document.getElementById('signing-progress').style.display = 'none';
             document.getElementById('signing-complete').style.display = 'block';
 
+            const successIcon = document.querySelector('#signing-complete .success-icon');
+            const dlBtn = document.getElementById('download-btn');
+
             if (errors.length > 0) {
                 showWizardError(3, errors.join('\n'));
                 document.getElementById('complete-text').textContent =
@@ -1846,11 +1983,27 @@
                     `All ${signedFiles.length} document${signedFiles.length > 1 ? 's' : ''} signed successfully!`;
             }
 
+            // Nothing signed: don't show a success tick or offer a download that
+            // would only produce an empty archive.
+            if (signedFiles.length === 0) {
+                if (successIcon) successIcon.textContent = '❌';
+                dlBtn.style.display = 'none';
+            } else {
+                if (successIcon) successIcon.textContent = '✅';
+                dlBtn.style.display = '';
+            }
+
             updateSignButton();
         }
 
         async function downloadSignedFiles() {
             const btn = document.getElementById('download-btn');
+
+            if (signedFiles.length === 0) {
+                alert('No signed documents to save - all documents failed to sign.');
+                return;
+            }
+
             btn.disabled = true;
             btn.textContent = 'Saving...';
 
