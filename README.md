@@ -21,6 +21,8 @@ CEI PDF Signer allows you to digitally sign PDF documents using the qualified ce
 - Modern, intuitive web interface
 - Sign multiple PDF documents at once
 - Visual signature placement on each document
+- Page navigation: jump to any page number, first page, last page
+- Apply the signature mark to every page of a document in one click
 - Support for ECDSA certificates from CEI
 - Automatic smart card reader detection
 - Direct export to Downloads folder
@@ -81,15 +83,32 @@ cd cei-web-signer
 
 If macOS takes control of the reader (shows "Smart card detected" notification) or the app hangs on startup:
 
-**Cause:** macOS CryptoTokenKit tries to use the reader simultaneously.
+**First, try this — it fixes it almost every time:** unplug the reader and plug it back
+in, preferably into a USB port on the Mac itself rather than through a hub. If the reader
+is visible to macOS but no card is found, re-seat the card in the reader.
 
-**Solution:**
+**Do not kill CryptoTokenKit.** `pkill ctkd` (or `ctkpcscd`, or `ctkahp`) takes down the
+PC/SC service that CryptoTokenKit provides, which makes the reader **completely invisible
+to every application** until it is physically re-plugged. It does not help: PKCS#11 access
+works fine while CryptoTokenKit is running. Verified on macOS 26.5 with IdPlug 2.7.0 —
+loading the library takes 0.2s and enumerating slots 2–20s, with all CryptoTokenKit
+daemons alive and untouched.
+
+Slot enumeration being slow is normal. The IdPlug driver discovers the card's applications
+progressively: the first read often shows only slot 1, with the signature slot appearing
+several seconds later. The app polls until it settles, so the first detection after
+inserting a card can take 10–20 seconds.
+
+**Only if re-plugging does not help**, you can disable macOS's smart-card services. This is
+a persistent, system-wide change that affects every application, so treat it as a last
+resort:
 ```bash
 sudo defaults write /Library/Preferences/com.apple.security.smartcard allowSmartCard -bool false
 sudo defaults write /Library/Preferences/com.apple.security.smartcard UserPairing -bool false
 sudo defaults write /Library/Preferences/com.apple.security.smartcard useIFDCCID -bool false
 # Restart your Mac for changes to take effect
 ```
+Reverse it with the same commands using `-bool true`.
 
 #### Debugging CryptoTokenKit
 
@@ -119,6 +138,8 @@ CEI PDF Signer permite semnarea digitala a documentelor PDF folosind certificatu
 - Interfata web moderna si intuitiva
 - Semnare multipla documente PDF
 - Selectare vizuala a pozitiei semnaturii pe document
+- Navigare pagini: salt la orice numar de pagina, prima pagina, ultima pagina
+- Aplicarea semnaturii pe toate paginile documentului dintr-un singur click
 - Suport pentru certificatele ECDSA de pe CEI
 - Detectare automata a cititorului de carduri
 - Export direct in folderul Downloads
@@ -179,15 +200,32 @@ cd cei-web-signer
 
 Daca macOS preia controlul asupra cititorului (apare notificare "Smart card detected") sau aplicatia se blocheaza la pornire:
 
-**Cauza:** macOS CryptoTokenKit incearca sa foloseasca cititorul simultan cu aplicatia noastra.
+**Incercati intai asta — rezolva problema aproape de fiecare data:** scoateti cititorul si
+introduceti-l din nou, de preferat intr-un port USB de pe Mac, nu printr-un hub. Daca
+cititorul este vizibil dar cardul nu este gasit, reintroduceti cardul in cititor.
 
-**Solutie:**
+**Nu opriti CryptoTokenKit.** `pkill ctkd` (sau `ctkpcscd`, sau `ctkahp`) opreste serviciul
+PC/SC furnizat de CryptoTokenKit, iar cititorul devine **complet invizibil pentru toate
+aplicatiile** pana cand este scos si introdus din nou fizic. Nu ajuta: accesul PKCS#11
+functioneaza normal cat timp CryptoTokenKit ruleaza. Verificat pe macOS 26.5 cu IdPlug
+2.7.0 — incarcarea bibliotecii dureaza 0.2s, iar enumerarea sloturilor 2–20s, cu toate
+procesele CryptoTokenKit pornite si neatinse.
+
+Enumerarea lenta a sloturilor este normala. Driverul IdPlug descopera aplicatiile de pe card
+progresiv: prima citire arata deseori doar slotul 1, iar slotul de semnare apare dupa cateva
+secunde. Aplicatia reincearca pana se stabilizeaza, deci prima detectare dupa introducerea
+cardului poate dura 10–20 de secunde.
+
+**Doar daca reintroducerea cititorului nu ajuta**, puteti dezactiva serviciile de smart card
+din macOS. Este o modificare permanenta, la nivel de sistem, care afecteaza toate
+aplicatiile, deci folositi-o ca ultima solutie:
 ```bash
 sudo defaults write /Library/Preferences/com.apple.security.smartcard allowSmartCard -bool false
 sudo defaults write /Library/Preferences/com.apple.security.smartcard UserPairing -bool false
 sudo defaults write /Library/Preferences/com.apple.security.smartcard useIFDCCID -bool false
 # Restartati Mac-ul pentru ca setarile sa aiba efect
 ```
+Se revine cu aceleasi comenzi folosind `-bool true`.
 
 #### Debugging CryptoTokenKit
 
