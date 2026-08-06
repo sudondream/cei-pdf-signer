@@ -733,6 +733,18 @@ class RomanianDiacriticsTests(unittest.TestCase):
         path = app_module.signature_font_path()
         self.assertTrue(os.path.isfile(path), f"font asset missing at {path}")
 
+    def test_status_reports_the_font_is_active(self):
+        """Lets the packaged build be checked from outside.
+
+        A bundle that cannot find its font still starts and still signs; it
+        just falls back to Courier and mangles Romanian names. Reporting the
+        state over /api/status is what lets the release verifier catch that
+        before the build is published.
+        """
+        payload = app_module.app.test_client().get('/api/status').get_json()
+        self.assertTrue(payload['signature_font_embedded'],
+                        f"font not active: {payload.get('signature_font_path')}")
+
 
 if __name__ == '__main__':
     unittest.main(verbosity=2)

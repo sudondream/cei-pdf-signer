@@ -465,11 +465,18 @@ def index():
 def api_status():
     """Check system status"""
     lib_path = get_pkcs11_lib_path()
+    font_path = signature_font_path()
     return jsonify({
         'pkcs11_available': PKCS11_AVAILABLE,
         'pyhanko_available': PYHANKO_AVAILABLE,
         'pkcs11_lib_path': lib_path,
-        'pkcs11_lib_exists': os.path.exists(lib_path)
+        'pkcs11_lib_exists': os.path.exists(lib_path),
+        # Reported so a packaged build can be checked from outside. If the
+        # font does not resolve inside the bundle the app still runs, but
+        # silently falls back to Courier and mangles Romanian names, which
+        # is precisely the failure this is meant to catch.
+        'signature_font_path': font_path,
+        'signature_font_embedded': EMBEDDED_FONT_AVAILABLE and os.path.isfile(font_path),
     })
 
 
