@@ -151,14 +151,33 @@ else
         perl -e 'select(undef,undef,undef,0.5)'
     done
 
-    kill "$PID" 2>/dev/null || true
-    wait "$PID" 2>/dev/null || true
-
+    STATUS=''
     if [ "$STARTED" -eq 1 ]; then
         pass "aplicatia porneste si serverul Flask raspunde"
+        URL="$(sed -n 's/.*Running on \(http:\/\/127[^ ]*\).*/\1/p' "$LOG" | head -1)"
+        STATUS="$(curl -fsS --max-time 10 "$URL/api/status" 2>/dev/null || true)"
     else
         fail "aplicatia nu a pornit; output:"
         sed 's/^/      /' "$LOG" | head -20
+    fi
+
+    kill "$PID" 2>/dev/null || true
+    wait "$PID" 2>/dev/null || true
+
+    # Interogat pe aplicatia impachetata, nu pe sursa: daca fontul nu se
+    # rezolva in bundle, aplicatia porneste normal dar revine la Courier si
+    # strica numele romanesti in tacere (issue #5).
+    if [ -n "$STATUS" ]; then
+        case "$STATUS" in
+            *'"signature_font_embedded":true'*)
+                pass "fontul pentru semnatura este activ in bundle" ;;
+            *)
+                fail "fontul pentru semnatura NU se rezolva in bundle; diacriticele"
+                echo "      vor fi stricate. /api/status a raspuns:"
+                echo "      $STATUS" ;;
+        esac
+    elif [ "$STARTED" -eq 1 ]; then
+        fail "nu am putut interoga /api/status pentru verificarea fontului"
     fi
 fi
 

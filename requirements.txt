@@ -2,6 +2,9 @@ Flask>=2.3.0
 flask-cors>=4.0.0
 pyhanko>=0.20.0
 pyhanko[pkcs11]
+# Embeds a Unicode font in the signature appearance; without it Romanian
+# diacritics cannot be rendered. Pulls in fontTools and uharfbuzz.
+pyhanko[opentype]
 cryptography>=41.0.0
 Werkzeug>=2.3.0
 pywebview>=4.0

@@ -20,6 +20,9 @@ a = Analysis(
     datas=[
         ('templates', 'templates'),
         ('icon.icns', '.'),
+        # Signature appearance font. Without it the stamp falls back to
+        # Courier, which cannot render Romanian diacritics.
+        ('assets/fonts', 'assets/fonts'),
     ],
     hiddenimports=[
         'app',
@@ -46,6 +49,12 @@ a = Analysis(
         'pyhanko.pdf_utils.layout',
         'pyhanko.pdf_utils.font',
         'pyhanko.pdf_utils.font.basic',
+        # Embeds the signature font so Romanian names render.
+        'pyhanko.pdf_utils.font.opentype',
+        'fontTools',
+        'fontTools.ttLib',
+        'fontTools.subset',
+        'uharfbuzz',
         'pyhanko.stamp',
         'pyhanko.stamp.text',
         'pyhanko_certvalidator',
