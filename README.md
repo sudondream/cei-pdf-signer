@@ -34,7 +34,7 @@ CEI PDF Signer allows you to digitally sign PDF documents using the qualified ce
 
 #### Software
 - macOS 10.13 or newer
-- [IDPlugManager](https://www.inteligent.ro/idplugmanager/) - official CEI software (provides the PKCS#11 library)
+- [IDPlugManager](https://hub.mai.gov.ro/aplicatie-cei) - official CEI software (provides the PKCS#11 library)
 
 ### Installation
 
@@ -132,7 +132,7 @@ CEI PDF Signer permite semnarea digitala a documentelor PDF folosind certificatu
 
 #### Software
 - macOS 10.13 sau mai nou
-- [IDPlugManager](https://www.inteligent.ro/idplugmanager/) - software-ul oficial pentru CEI (instaleaza biblioteca PKCS#11)
+- [IDPlugManager](https://hub.mai.gov.ro/aplicatie-cei) - software-ul oficial pentru CEI (instaleaza biblioteca PKCS#11)
 
 ### Instalare
 
