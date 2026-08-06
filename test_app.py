@@ -454,10 +454,16 @@ class NoCtkKillTests(unittest.TestCase):
                          "kill_ctkd tears down ctkpcscd and blinds the reader; it must not come back")
 
     def test_source_has_no_ctk_pkill(self):
-        with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), 'app.py')) as fh:
-            src = fh.read()
-        for needle in ('pkill', 'ctkd', 'ctkahp', 'with administrator privileges'):
-            self.assertFalse(needle in src, f"app.py must not reference {needle!r}")
+        # main.py is checked too: it is what launches the app, and a stale
+        # "Kill CTK, start Flask" docstring survived there once already.
+        here = os.path.dirname(os.path.abspath(__file__))
+        for filename in ('app.py', 'main.py'):
+            with open(os.path.join(here, filename)) as fh:
+                src = fh.read()
+            for needle in ('pkill', 'ctkd', 'ctkahp', 'Kill CTK',
+                           'with administrator privileges'):
+                self.assertFalse(needle in src,
+                                 f"{filename} must not reference {needle!r}")
 
 
 if __name__ == '__main__':

@@ -129,7 +129,7 @@ def main():
     )
 
     def start_app():
-        """Kill CTK, start Flask, and navigate to it once ready"""
+        """Start Flask and navigate to it once ready"""
         # Start Flask server in background thread
         server_thread = threading.Thread(target=start_server, args=(port,), daemon=True)
         server_thread.start()
