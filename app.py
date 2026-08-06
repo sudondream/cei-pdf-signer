@@ -717,6 +717,33 @@ def api_sign_pdf():
                 pass
 
 
+# Destinations offered by the About section. The frontend sends one of these
+# KEYS, never a URL, so this endpoint cannot be turned into an arbitrary-URL
+# (or arbitrary-argument) opener.
+ABOUT_LINKS = {
+    'website': 'https://plixco.ro',
+    'github': 'https://github.com/sudondream',
+    'linkedin': 'https://www.linkedin.com/in/sudondream/',
+    'email': 'mailto:contact@plixco.ro',
+}
+
+
+@app.route('/api/open-external', methods=['POST'])
+def api_open_external():
+    """Open an About link in the user's default browser or mail client.
+
+    Needed because pywebview would otherwise follow the link in the app window
+    itself, replacing the signer UI with the target page.
+    """
+    data = request.json or {}
+    url = ABOUT_LINKS.get(data.get('key'))
+    if not url:
+        return jsonify({'error': 'Unknown link'}), 400
+
+    subprocess.run(['open', url], check=False)
+    return jsonify({'success': True})
+
+
 DOWNLOADS_FOLDER = os.path.expanduser('~/Downloads')
 
 

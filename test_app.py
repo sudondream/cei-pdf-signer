@@ -387,6 +387,62 @@ class StampAllPagesTests(unittest.TestCase):
             app_module.apply_visual_stamps(writer, reader, [], 2, 'X', 'Y'), 0)
 
 
+class OpenExternalTests(unittest.TestCase):
+    """About links must open in the real browser, and only known destinations.
+
+    pywebview navigates the app window itself on a normal link, which would
+    strand the user on an external page with no way back to the app.
+    """
+
+    def setUp(self):
+        app_module.app.config['TESTING'] = True
+        self.client = app_module.app.test_client()
+
+    def test_known_key_opens_the_right_url(self):
+        with mock.patch.object(app_module.subprocess, 'run') as run:
+            resp = self.client.post('/api/open-external', json={'key': 'github'})
+        self.assertEqual(resp.status_code, 200)
+        run.assert_called_once()
+        self.assertEqual(run.call_args[0][0],
+                         ['open', 'https://github.com/sudondream'])
+
+    def test_linkedin_opens_the_right_url(self):
+        with mock.patch.object(app_module.subprocess, 'run') as run:
+            resp = self.client.post('/api/open-external', json={'key': 'linkedin'})
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(run.call_args[0][0],
+                         ['open', 'https://www.linkedin.com/in/sudondream/'])
+
+    def test_every_about_link_is_reachable(self):
+        for key in ('website', 'github', 'linkedin', 'email'):
+            with mock.patch.object(app_module.subprocess, 'run') as run:
+                resp = self.client.post('/api/open-external', json={'key': key})
+            self.assertEqual(resp.status_code, 200, key)
+            run.assert_called_once()
+
+    def test_unknown_key_is_rejected_and_opens_nothing(self):
+        with mock.patch.object(app_module.subprocess, 'run') as run:
+            resp = self.client.post('/api/open-external', json={'key': 'nope'})
+        self.assertEqual(resp.status_code, 400)
+        run.assert_not_called()
+
+    def test_raw_url_cannot_be_injected(self):
+        # The frontend sends a key, never a URL, so this must not be usable as
+        # an arbitrary-URL or arbitrary-argument opener.
+        for hostile in ('https://evil.example.com', 'file:///etc/passwd',
+                        '/Applications/Calculator.app', '-a', ''):
+            with mock.patch.object(app_module.subprocess, 'run') as run:
+                resp = self.client.post('/api/open-external', json={'key': hostile})
+            self.assertEqual(resp.status_code, 400, hostile)
+            run.assert_not_called()
+
+    def test_missing_body_is_rejected(self):
+        with mock.patch.object(app_module.subprocess, 'run') as run:
+            resp = self.client.post('/api/open-external', json={})
+        self.assertEqual(resp.status_code, 400)
+        run.assert_not_called()
+
+
 class NoCtkKillTests(unittest.TestCase):
     """Killing CryptoTokenKit made the reader invisible to PC/SC until re-plug.
 
