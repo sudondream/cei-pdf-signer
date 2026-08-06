@@ -27,10 +27,29 @@ ZIP_NAME="CEI-PDF-Signer-${VERSION}-macOS.zip"
 echo ""
 echo "Creez arhiva pentru release..."
 
-# Creeaza ZIP-ul cu aplicatia
-cd dist
-zip -r -y "../$RELEASE_DIR/$ZIP_NAME" "CEI PDF Signer.app"
-cd ..
+# IMPORTANT: se foloseste `ditto`, NU `zip`.
+#
+# Bundle-ul .app contine ~45 de symlink-uri (ex. Contents/Frameworks/python3.14
+# -> python3__dot__14) si depinde de bitii de executie POSIX. Orice arhivator
+# care nu le pastreaza distruge aplicatia in mod silentios: utilizatorul
+# primeste "The application can't be opened." sau
+# "ModuleNotFoundError: No module named '_struct'" (issues #4, #6, #7).
+#
+# `ditto -c -k --sequesterRsrc --keepParent` este metoda suportata de Apple
+# pentru arhivarea bundle-urilor si pastreaza symlink-uri, permisiuni si
+# atribute extinse. NU inlocui cu `zip`, `python -m zipfile` sau
+# "Compress" din alte platforme.
+ditto -c -k --sequesterRsrc --keepParent \
+    "dist/CEI PDF Signer.app" \
+    "$RELEASE_DIR/$ZIP_NAME"
+
+# Verifica arhiva rezultata inainte de a o publica. Fara acest pas,
+# o arhiva stricata ajunge in Releases si aplicatia nu porneste pe
+# niciun calculator in afara celui pe care s-a facut build-ul.
+echo ""
+./scripts/verify-release-archive.sh \
+    "$RELEASE_DIR/$ZIP_NAME" \
+    "dist/CEI PDF Signer.app"
 
 # Calculeaza SHA256
 echo ""
@@ -51,8 +70,9 @@ echo "SHA256: $SHA256"
 echo ""
 echo "Pentru a publica pe GitHub:"
 echo "  1. git push origin main --tags"
-echo "  2. Mergi la https://github.com/USERNAME/cei-web-signer/releases"
-echo "  3. Click 'Draft a new release'"
-echo "  4. Selecteaza tag-ul $VERSION"
-echo "  5. Incarca fisierul $ZIP_NAME"
+echo "  2. gh release create $VERSION '$RELEASE_DIR/$ZIP_NAME' --repo sudondream/cei-pdf-signer"
+echo ""
+echo "ATENTIE: incarca EXACT fisierul $ZIP_NAME generat mai sus."
+echo "Nu re-arhiva aplicatia cu Finder sau cu alte unelte - se pierd"
+echo "symlink-urile si aplicatia nu mai porneste (issues #4, #6, #7)."
 echo ""
