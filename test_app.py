@@ -12,6 +12,7 @@ These cover the two defects that produced "0 of 3 signed, empty zip":
 No smart card required.
 """
 import os
+import re
 import tempfile
 import unittest
 import zipfile
@@ -464,6 +465,56 @@ class NoCtkKillTests(unittest.TestCase):
                            'with administrator privileges'):
                 self.assertFalse(needle in src,
                                  f"{filename} must not reference {needle!r}")
+
+
+class NoPyKCS11Tests(unittest.TestCase):
+    """PyKCS11 was replaced by python-pkcs11 and must not creep back.
+
+    It hung on the Idemia driver, and a wildcard `from PyKCS11 import *`
+    dumps ~200 CK* names into module scope where they can shadow anything.
+    Shipping it also means bundling a dependency nothing calls.
+    """
+
+    SOURCES = ('app.py', 'main.py', 'setup.py', 'CEIPDFSigner.spec', 'requirements.txt')
+
+    # Matches importing it or listing it as a dependency, not merely naming it -
+    # the comment in app.py explaining why it was dropped has to stay legal.
+    REINTRODUCED = re.compile(
+        r'^\s*(?:import\s+PyKCS11|from\s+PyKCS11\b|["\']PyKCS11["\'],?|PyKCS11\s*[><=])',
+        re.MULTILINE,
+    )
+
+    def test_no_source_imports_or_ships_pykcs11(self):
+        here = os.path.dirname(os.path.abspath(__file__))
+        for filename in self.SOURCES:
+            with open(os.path.join(here, filename)) as fh:
+                src = fh.read()
+            hit = self.REINTRODUCED.search(src)
+            self.assertIsNone(hit,
+                              f"{filename} imports or ships PyKCS11 ({hit.group(0).strip()!r} "
+                              f"at char {hit.start()}); the card is driven by python-pkcs11"
+                              if hit else '')
+
+    def test_wildcard_import_did_not_leak_ck_constants(self):
+        """`from PyKCS11 import *` dumped every CK* name into app's namespace.
+
+        Checked separately from the source scan because this is the concrete
+        harm: ~200 unqualified constants able to shadow module-level names.
+        """
+        for leaked in ('CKA_CLASS', 'CKO_CERTIFICATE', 'CKF_SERIAL_SESSION'):
+            self.assertFalse(hasattr(app_module, leaked),
+                             f"{leaked} leaked into app.py via a wildcard import")
+
+    def test_status_reports_the_library_actually_used(self):
+        """pkcs11_available must track python-pkcs11, not the dropped binding.
+
+        The frontend gates its "dependencies missing" warning on this flag, so
+        pointing it at an unused library warns about the wrong thing.
+        """
+        client = app_module.app.test_client()
+        payload = client.get('/api/status').get_json()
+        self.assertTrue(payload['pkcs11_available'],
+                        "python-pkcs11 is importable, so the flag must be True")
 
 
 if __name__ == '__main__':
