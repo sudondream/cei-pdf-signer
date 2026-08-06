@@ -517,5 +517,222 @@ class NoPyKCS11Tests(unittest.TestCase):
                         "python-pkcs11 is importable, so the flag must be True")
 
 
+class RomanianDiacriticsTests(unittest.TestCase):
+    """The signature appearance has to render Romanian names correctly.
+
+    The stamp used to draw its text with Courier, a PDF standard font declared
+    /WinAnsiEncoding. WinAnsi has no s-comma, t-comma or a-breve, so pyHanko
+    fell back to writing the whole string as UTF-16BE. A simple font reads
+    those bytes one at a time, so a single diacritic destroyed the entire
+    line: "Stefan Rusie" came out as thorn, y-diaeresis and NULs.
+
+    Note the blast radius. 'a-circumflex' and 'i-circumflex' do exist in
+    WinAnsi, but one s-comma anywhere in the name switches the encoding for
+    every character, so the correct ones break too.
+
+    Fixed by embedding DejaVu Sans, which covers Romanian and lets the text be
+    drawn as glyph indices carrying a /ToUnicode map back to the original.
+    """
+
+    # Every Romanian diacritic, in both cases, plus a plain ASCII surname.
+    SIGNER = 'ȘTEFAN RUSIE ăâîșț ĂÂÎȘȚ'
+
+    @staticmethod
+    def _render(signer):
+        """Render the real signature appearance. Returns (content, font dict).
+
+        The document is written out before the font is inspected: the glyph
+        accumulator only emits the subset font program and the /ToUnicode CMap
+        when the writer is finalised.
+        """
+        from io import BytesIO
+        from pyhanko.pdf_utils.writer import PdfFileWriter
+        from pyhanko.pdf_utils import generic
+        from pyhanko.stamp import TextStamp
+
+        writer = PdfFileWriter()
+        writer.insert_page(generic.DictionaryObject({
+            generic.NameObject('/Type'): generic.NameObject('/Page'),
+            generic.NameObject('/MediaBox'): generic.ArrayObject(
+                map(generic.NumberObject, [0, 0, 595, 842])),
+            generic.NameObject('/Resources'): generic.DictionaryObject(),
+        }))
+        stamp = TextStamp(writer, app_module.build_stamp_style(),
+                          text_params={'signer': signer, 'ts': '2026-08-06 12:00'})
+        xobject = stamp.as_form_xobject()
+        content = getattr(xobject, 'data', None) or xobject.encoded_data
+        writer.write(BytesIO())
+        fonts = xobject.get('/Resources')['/Font']
+        return content, fonts.raw_get(list(fonts.keys())[0]).get_object()
+
+    @staticmethod
+    def _to_unicode(font_dict):
+        """Glyph code -> character, parsed from the font's /ToUnicode CMap.
+
+        This is the same table a viewer uses to render and to copy text out,
+        so decoding through it tests what the user actually sees.
+        """
+        stream = font_dict.raw_get('/ToUnicode').get_object()
+        cmap = (getattr(stream, 'data', None) or stream.encoded_data).decode('latin-1')
+        table = {}
+        for block in re.findall(r'beginbfchar(.*?)endbfchar', cmap, re.S):
+            for src, dst in re.findall(r'<([0-9a-fA-F]+)>\s*<([0-9a-fA-F]+)>', block):
+                table[int(src, 16)] = chr(int(dst, 16))
+        listed = re.compile(r'<([0-9a-fA-F]+)>\s*<([0-9a-fA-F]+)>\s*\[(.*?)\]', re.S)
+        for block in re.findall(r'beginbfrange(.*?)endbfrange', cmap, re.S):
+            # <lo> <hi> [<d1> <d2> ...]
+            for lo, _hi, targets in listed.findall(block):
+                for offset, dst in enumerate(re.findall(r'<([0-9a-fA-F]+)>', targets)):
+                    table[int(lo, 16) + offset] = chr(int(dst, 16))
+            # <lo> <hi> <dststart>, on what is left once the bracketed entries
+            # are gone. Without stripping them first this pattern happily
+            # matches three consecutive codes *inside* a [...] list.
+            for lo, hi, start in re.findall(
+                    r'<([0-9a-fA-F]+)>\s*<([0-9a-fA-F]+)>\s*<([0-9a-fA-F]+)>',
+                    listed.sub('', block)):
+                for offset in range(int(hi, 16) - int(lo, 16) + 1):
+                    table[int(lo, 16) + offset] = chr(int(start, 16) + offset)
+        return table
+
+    @classmethod
+    def _drawn_lines(cls, content, font_dict):
+        """The text a viewer would show, decoded back out of the content stream."""
+        table = cls._to_unicode(font_dict)
+        lines = []
+        # A TJ array interleaves hex glyph strings with kerning adjustments,
+        # e.g. [<0027002c> 159 <0024002f>]. Only the hex chunks are text.
+        for array in re.findall(rb'\[(.*?)\]\s*TJ', content, re.S):
+            codes = b''.join(re.findall(rb'<([0-9a-fA-F]+)>', array)).decode('ascii')
+            lines.append(''.join(
+                table.get(int(codes[i:i + 4], 16), '�')
+                for i in range(0, len(codes), 4)))
+        return lines
+
+    def test_diacritics_reach_the_page_intact(self):
+        """The regression itself: the name must survive to the content stream."""
+        content, font = self._render(self.SIGNER)
+        self.assertIn('/ToUnicode', font,
+                      "no /ToUnicode map, so the text cannot be rendered or copied")
+        self.assertIn(self.SIGNER, self._drawn_lines(content, font),
+                      "signer name did not survive into the appearance stream")
+
+    def test_no_utf16_fallback(self):
+        """UTF-16 reaching a text-showing operator means the old path is back.
+
+        Checked separately from the round trip because this is the exact
+        fingerprint users reported, and it can reappear on its own if the
+        font ever fails to load and pyHanko falls back to a standard font.
+
+        Only Tj operators are examined. A UTF-16BE string is also written into
+        /Span << /ActualText (...) >>, but that is a PDF text string declaring
+        what the glyphs mean, which is correct and wanted.
+        """
+        content, _ = self._render(self.SIGNER)
+        shown = re.findall(rb'\((?:[^()\\]|\\.)*\)\s*Tj', content)
+        for operand in shown:
+            self.assertNotIn(rb'\376\377', operand,
+                             f"text drawn as UTF-16BE through a simple font: {operand!r}")
+
+    def test_font_is_embedded_not_substituted(self):
+        """A signature appearance has to carry its own font.
+
+        Referencing a non-embedded font leaves the rendering up to whatever
+        the viewer happens to substitute, which is not acceptable on a
+        document meant to stay valid for years.
+        """
+        _, font = self._render(self.SIGNER)
+        self.assertEqual(font.get('/Subtype'), '/Type0',
+                         "expected a composite font capable of Unicode")
+        descendant = font.raw_get('/DescendantFonts').get_object()[0].get_object()
+        descriptor = descendant.raw_get('/FontDescriptor').get_object()
+        self.assertTrue(
+            any(k in descriptor for k in ('/FontFile', '/FontFile2', '/FontFile3')),
+            "font program is not embedded in the document")
+
+    def test_lines_do_not_drift_sideways(self):
+        """Every line has to start at the same x as the one above it.
+
+        The glyph accumulator and TextBoxStyle each carry their own font_size.
+        pyHanko uses the accumulator's to emit the advance after drawing a
+        line, but the style's to travel back to the next line's start, so if
+        they disagree the difference accumulates and walks the text out of its
+        box. Nothing raises; it is only visible once rendered, which is how it
+        got missed the first time.
+        """
+        content, _ = self._render(self.SIGNER)
+        moves = re.findall(
+            rb'TJ\s+(-?[\d.]+)\s+0\s+Td\s+EMC\s+(-?[\d.]+)\s+(-?[\d.]+)\s+Td', content)
+        self.assertTrue(moves, "no line advances found in the appearance stream")
+        for forward, back, _leading in moves:
+            self.assertAlmostEqual(
+                float(forward), -float(back), places=3,
+                msg=f"line advance {float(forward)} is not undone by {float(back)}; "
+                    "check that STAMP_FONT_SIZE reaches the glyph accumulator")
+
+    def test_viewer_advances_match_the_layout(self):
+        """The widths a viewer uses must agree with the widths pyHanko laid out.
+
+        pyHanko copies a CID font's /W array straight out of the font's hmtx
+        table, in raw design units, but PDF fixes CIDFontType2 glyph space at
+        1/1000 of text space. The two only agree when the font has 1000 units
+        per em. Stock DejaVu Sans has 2048, so a viewer advanced 2.048x too far
+        on every glyph and the text ran out of its box, while pyHanko's own
+        layout stayed correct because that path divides by unitsPerEm. The
+        vendored font is rescaled to 1000 to keep the two in step; see
+        scripts/prepare-signature-font.py.
+        """
+        content, font = self._render('ADRIAN BANCU')
+        descendant = font.raw_get('/DescendantFonts').get_object()[0].get_object()
+
+        widths = {}
+        entries = list(descendant.get('/W'))
+        i = 0
+        while i < len(entries):
+            first = int(entries[i])
+            run = entries[i + 1]
+            if isinstance(run, (list, tuple)) or hasattr(run, '__iter__'):
+                for offset, width in enumerate(run):
+                    widths[first + offset] = float(width)
+                i += 2
+            else:  # cFirst cLast width
+                for cid in range(first, int(run) + 1):
+                    widths[cid] = float(entries[i + 2])
+                i += 3
+
+        arrays = re.findall(rb'\[(.*?)\]\s*TJ\s+(-?[\d.]+)\s+0\s+Td', content, re.S)
+        self.assertTrue(arrays, "no glyph runs found")
+        for array, laid_out in arrays:
+            codes = b''.join(re.findall(rb'<([0-9a-fA-F]+)>', array)).decode('ascii')
+            kerning = sum(float(k) for k in re.findall(rb'>\s*(-?\d+)\s*<', array))
+            total = sum(widths[int(codes[i:i + 4], 16)]
+                        for i in range(0, len(codes), 4))
+            # /W is per mille of text space; kerning in a TJ array is subtracted.
+            rendered = (total - kerning) / 1000.0 * app_module.STAMP_FONT_SIZE
+            self.assertAlmostEqual(
+                rendered, float(laid_out), delta=0.5,
+                msg=f"a viewer would advance {rendered:.1f}pt where pyHanko laid "
+                    f"out {float(laid_out):.1f}pt; check the font's unitsPerEm")
+
+    def test_leaves_room_under_the_baseline(self):
+        """s-comma and t-comma sit below the baseline and need the space.
+
+        With leading equal to the font size the marks under s and t collide
+        with the line underneath, which is what made a correctly encoded
+        Romanian name still look wrong.
+        """
+        self.assertGreater(app_module.STAMP_LEADING, app_module.STAMP_FONT_SIZE,
+                           "no room below the baseline for s-comma and t-comma")
+
+    def test_plain_ascii_names_still_render(self):
+        """The common case must not regress while fixing the uncommon one."""
+        content, font = self._render('ADRIAN BANCU')
+        self.assertIn('ADRIAN BANCU', self._drawn_lines(content, font))
+
+    def test_font_asset_ships_with_the_app(self):
+        """The .ttf has to resolve both from source and from the bundle."""
+        path = app_module.signature_font_path()
+        self.assertTrue(os.path.isfile(path), f"font asset missing at {path}")
+
+
 if __name__ == '__main__':
     unittest.main(verbosity=2)

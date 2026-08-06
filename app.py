@@ -43,6 +43,18 @@ except ImportError:
     PYHANKO_AVAILABLE = False
     print("Warning: pyhanko not installed. Install with: pip install pyhanko 'pyhanko[pkcs11]'")
 
+# Embedding a real font is what makes Romanian names render. pyHanko's default
+# is Courier, a standard font declared /WinAnsiEncoding, which has no s-comma,
+# t-comma or a-breve; pyHanko then writes the whole string as UTF-16BE and a
+# simple font reads it byte by byte, so one diacritic garbles the entire line.
+try:
+    from pyhanko.pdf_utils.font.opentype import GlyphAccumulatorFactory
+    EMBEDDED_FONT_AVAILABLE = True
+except ImportError:
+    EMBEDDED_FONT_AVAILABLE = False
+    print("Warning: pyhanko[opentype] not installed, so Romanian diacritics "
+          "will not render in signatures. Install with: pip install 'pyHanko[opentype]'")
+
 # Handle bundled app paths (py2app)
 if getattr(sys, 'frozen', False):
     # Running as a bundled app
@@ -287,6 +299,69 @@ def document_has_signature(pdf_reader):
     return False
 
 
+# DejaVu Sans covers every Romanian letter, in both the correct comma-below
+# forms (U+0218/U+021A/U+0219/U+021B) and the legacy cedilla ones certificates
+# sometimes carry. Vendored because the font has to travel with the .app: a
+# non-embedded font leaves rendering to whatever the viewer substitutes, which
+# is not good enough on a document meant to stay valid for years.
+SIGNATURE_FONT = os.path.join('assets', 'fonts', 'DejaVuSans-1000upem.ttf')
+
+# Must be handed to the glyph accumulator *and* to TextBoxStyle. They carry
+# separate font_size settings, and pyHanko uses the accumulator's to emit the
+# advance after each line but the style's to return to the next line's start.
+# Leave the accumulator at its default 10 while the style says 28 and every
+# line begins further left than the last, walking the text out of its box.
+STAMP_FONT_SIZE = 28
+
+# pyHanko defaults leading to the font size, which leaves nothing below the
+# baseline. Romanian puts a comma under s and t, and at zero extra leading
+# those marks land on top of the line beneath. Enough room for them, and still
+# three lines inside the smallest box the UI allows.
+STAMP_LEADING = 34
+
+
+def signature_font_path():
+    """Locate the signature font, running from source or from the bundle.
+
+    PyInstaller puts declared data files under sys._MEIPASS, which for a .app
+    is Contents/Frameworks. Contents/Resources holds symlinks to the same tree
+    and is where main.py chdirs, so both are tried.
+    """
+    candidates = []
+    if getattr(sys, 'frozen', False):
+        meipass = getattr(sys, '_MEIPASS', None)
+        if meipass:
+            candidates.append(os.path.join(meipass, SIGNATURE_FONT))
+        bundle_dir = os.path.dirname(sys.executable)
+        candidates.append(os.path.join(os.path.dirname(bundle_dir),
+                                       'Resources', SIGNATURE_FONT))
+    candidates.append(os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                   SIGNATURE_FONT))
+    for path in candidates:
+        if os.path.isfile(path):
+            return path
+    # Nothing found: hand back the source-tree path so the error names a
+    # location a developer can act on.
+    return candidates[-1]
+
+
+def build_font_factory():
+    """Font engine for the stamp text, or None to accept pyHanko's default.
+
+    None means Courier, which cannot render Romanian. That is only reached
+    when the optional opentype extras or the font asset are missing, and both
+    are covered by tests, so it should not happen in a shipped build.
+    """
+    if not EMBEDDED_FONT_AVAILABLE:
+        return None
+    path = signature_font_path()
+    if not os.path.isfile(path):
+        print(f"Warning: signature font missing at {path}; "
+              "Romanian diacritics will not render")
+        return None
+    return GlyphAccumulatorFactory(font_file=path, font_size=STAMP_FONT_SIZE)
+
+
 def build_stamp_style():
     """The signature appearance, shared by the real field and the page stamps.
 
@@ -307,9 +382,15 @@ def build_stamp_style():
         Q
         '''
     )
+    font_factory = build_font_factory()
+    text_box_style = (
+        TextBoxStyle(font=font_factory, font_size=STAMP_FONT_SIZE,
+                     leading=STAMP_LEADING)
+        if font_factory is not None
+        else TextBoxStyle(font_size=STAMP_FONT_SIZE, leading=STAMP_LEADING))
     return TextStampStyle(
         stamp_text='DIGITALLY SIGNED\n%(signer)s\n%(ts)s',
-        text_box_style=TextBoxStyle(font_size=28),
+        text_box_style=text_box_style,
         border_width=3,
         border_color=(0.2, 0.4, 0.8),
         background=seal_graphic,
