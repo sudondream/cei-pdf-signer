@@ -1,6 +1,6 @@
 # CEI PDF Signer
 
-**[🌐 Website](https://bancuthekind.github.io/cei-pdf-signer)** | **[📥 Download](https://github.com/BancuTheKind/cei-pdf-signer/releases)**
+**[🌐 Website](https://sudondream.github.io/cei-pdf-signer)** | **[📥 Download](https://github.com/sudondream/cei-pdf-signer/releases)**
 
 Free, open-source macOS application for digitally signing PDF documents using the Romanian Electronic Identity Card (CEI).
 
@@ -49,7 +49,7 @@ CEI PDF Signer allows you to digitally sign PDF documents using the qualified ce
 #### Option 2: From Source
 
 ```bash
-git clone https://github.com/BancuTheKind/cei-pdf-signer.git
+git clone https://github.com/sudondream/cei-pdf-signer.git
 cd cei-web-signer
 ./run.sh
 ```
@@ -166,7 +166,7 @@ CEI PDF Signer permite semnarea digitala a documentelor PDF folosind certificatu
 #### Varianta 2: Din sursa
 
 ```bash
-git clone https://github.com/BancuTheKind/cei-pdf-signer.git
+git clone https://github.com/sudondream/cei-pdf-signer.git
 cd cei-web-signer
 ./run.sh
 ```
