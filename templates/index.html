@@ -339,6 +339,26 @@
             cursor: not-allowed;
         }
 
+        .btn-clear-boxes {
+            margin-left: 8px;
+            padding: 5px 12px;
+            font-size: 13px;
+            color: #ff6464;
+            background: rgba(255, 100, 100, 0.1);
+            border: 1px solid rgba(255, 100, 100, 0.35);
+            border-radius: 6px;
+            cursor: pointer;
+        }
+
+        .btn-clear-boxes:hover:not(:disabled) {
+            background: rgba(255, 100, 100, 0.2);
+        }
+
+        .btn-clear-boxes:disabled {
+            opacity: 0.3;
+            cursor: not-allowed;
+        }
+
         .zoom-controls {
             display: flex;
             align-items: center;
@@ -912,6 +932,10 @@
                 <button class="btn-all-pages" id="all-pages-btn" onclick="applyBoxToAllPages()"
                         title="Copy this page's signature box to every page">
                     Apply to all pages
+                </button>
+                <button class="btn-clear-boxes" id="clear-boxes-btn" onclick="clearAllBoxes()"
+                        title="Remove every signature box from this document">
+                    Clear all
                 </button>
                 <div class="zoom-controls">
                     <button onclick="zoomOut()">-</button>
@@ -1568,8 +1592,32 @@
 
         function updateAllPagesButton() {
             const btn = document.getElementById('all-pages-btn');
-            if (!btn) return;
-            btn.disabled = totalPages < 2 || boxesOnCurrentPage().length === 0;
+            if (btn) btn.disabled = totalPages < 2 || boxesOnCurrentPage().length === 0;
+
+            const clearBtn = document.getElementById('clear-boxes-btn');
+            if (clearBtn) {
+                const count = (signatureBoxes[selectedFileIndex] || []).length;
+                clearBtn.disabled = count === 0;
+                clearBtn.textContent = count > 1 ? `Clear all (${count})` : 'Clear all';
+            }
+        }
+
+        function clearAllBoxes() {
+            const boxes = signatureBoxes[selectedFileIndex] || [];
+            if (boxes.length === 0) return;
+
+            // Only worth confirming when it would undo more than a single box.
+            if (boxes.length > 1 &&
+                !confirm(`Remove all ${boxes.length} signature boxes from this document?`)) {
+                return;
+            }
+
+            signatureBoxes[selectedFileIndex] = [];
+            renderSignatureBoxes();
+            renderFileList();
+            updateSigBoxesInfo();
+            updateSignButton();
+            updatePageNav();
         }
 
         function applyBoxToAllPages() {
