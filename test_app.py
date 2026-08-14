@@ -1117,6 +1117,100 @@ class DetectTimeoutTests(unittest.TestCase):
                              ('Idemia Reader', True))
 
 
+class BoundedCallTests(unittest.TestCase):
+    """Blocking driver calls run under a deadline, and a wedge is remembered.
+
+    A C call that never returns cannot be cancelled from Python, so its thread
+    is abandoned. Without remembering that, every 15s poll strands another one.
+    """
+
+    def setUp(self):
+        self.caller = app_module.BoundedCaller('test')
+
+    def test_returns_the_value_when_the_call_completes(self):
+        self.assertEqual(self.caller.call(lambda: 'done', timeout=5), 'done')
+
+    def test_propagates_the_error_when_the_call_raises(self):
+        def boom():
+            raise ValueError('driver said no')
+        with self.assertRaises(ValueError):
+            self.caller.call(boom, timeout=5)
+
+    def test_raises_when_the_call_outlives_its_deadline(self):
+        with self.assertRaises(app_module.CallTimeout):
+            self.caller.call(lambda: time.sleep(30), timeout=0.2)
+
+    def test_a_wedged_call_is_not_joined_by_the_next_one(self):
+        release = threading.Event()
+        calls = []
+
+        def wedged():
+            calls.append(1)
+            release.wait(30)
+
+        for _ in range(3):
+            with self.assertRaises(app_module.CallTimeout):
+                self.caller.call(wedged, timeout=0.2)
+        release.set()
+        self.assertEqual(len(calls), 1, "each attempt stranded another thread")
+
+    def test_recovers_once_the_wedged_call_finishes(self):
+        release = threading.Event()
+        with self.assertRaises(app_module.CallTimeout):
+            self.caller.call(lambda: release.wait(30), timeout=0.2)
+        release.set()
+        time.sleep(0.2)
+        self.assertEqual(self.caller.call(lambda: 'ok', timeout=5), 'ok')
+
+
+class WedgedDriverTests(unittest.TestCase):
+    """The Idemia driver can deadlock inside a single get_slots() call.
+
+    Observed 2026-08-14: two threads inside the driver deadlock, the call never
+    returns, and only a reboot clears it. SLOT_SETTLE_TIMEOUT bounds the
+    polling loop but is checked only between calls, so nothing bounded this.
+    """
+
+    def setUp(self):
+        app_module.reset_detection_state()
+        self.addCleanup(app_module.reset_detection_state)
+
+    def _wedged_lib(self):
+        lib = mock.Mock()
+        lib.get_slots.side_effect = lambda **kw: time.sleep(30)
+        return lib
+
+    def test_enumerate_slots_gives_up_instead_of_hanging(self):
+        with mock.patch.object(app_module, 'PKCS11_CALL_TIMEOUT', 0.2):
+            with self.assertRaises(app_module.DriverTimeout):
+                app_module.enumerate_slots(self._wedged_lib())
+
+    def test_enumerate_slots_does_not_swallow_it_as_an_empty_card(self):
+        """The loop treats call failures as "no slots yet" and keeps polling.
+        A wedge must break out of that, not look like a slow card."""
+        with mock.patch.object(app_module, 'PKCS11_CALL_TIMEOUT', 0.2):
+            try:
+                app_module.enumerate_slots(self._wedged_lib())
+            except app_module.DriverTimeout:
+                return
+        self.fail("wedge was swallowed and reported as no slots")
+
+    def test_find_slot_gives_up_instead_of_hanging(self):
+        with mock.patch.object(app_module, 'PKCS11_CALL_TIMEOUT', 0.2):
+            with self.assertRaises(app_module.DriverTimeout):
+                app_module.find_slot(self._wedged_lib(), 2)
+
+    def test_api_reports_a_wedged_driver_and_says_what_to_do(self):
+        with mock.patch.object(app_module, 'detect_reader', return_value=('R', True)), \
+             mock.patch.object(app_module.pkcs11, 'lib', mock.Mock()), \
+             mock.patch.object(app_module, 'enumerate_slots',
+                               side_effect=app_module.DriverTimeout('stuck')):
+            payload = app_module.app.test_client().get('/api/slots').get_json()
+        self.assertEqual(payload['code'], 'driver_wedged')
+        self.assertIn('restart', payload['error'].lower(),
+                      "only a reboot clears this; the message has to say so")
+
+
 class TimeoutBudgetTests(unittest.TestCase):
     """The server must answer before the browser gives up on it.
 
@@ -1144,6 +1238,13 @@ class TimeoutBudgetTests(unittest.TestCase):
             budget, self._client_abort_seconds() - self.MARGIN,
             f"server can take up to {budget:g}s but the browser aborts at "
             f"{self._client_abort_seconds():g}s; the user would never see the real error")
+
+    def test_a_single_driver_call_cannot_outlast_the_loop_that_polls_it(self):
+        """Otherwise one wedged call blows the whole request budget on its own."""
+        self.assertLessEqual(app_module.PKCS11_CALL_TIMEOUT,
+                             app_module.SLOT_SETTLE_TIMEOUT)
+        worst_case = app_module.DETECT_TIMEOUT + app_module.PKCS11_CALL_TIMEOUT
+        self.assertLessEqual(worst_case, self._client_abort_seconds() - self.MARGIN)
 
     def test_detection_deadline_is_generous_against_a_healthy_service(self):
         """PC/SC answers in milliseconds; the deadline only catches a wedge."""

@@ -88,6 +88,84 @@ def get_pkcs11_lib_path(custom_path=None):
     return os.environ.get('PKCS11_LIB', DEFAULT_PKCS11_LIB)
 
 
+class CallTimeout(Exception):
+    """A blocking driver call did not return within its deadline."""
+
+
+class DetectTimeout(CallTimeout):
+    """Reader detection did not finish within its deadline."""
+
+
+class DriverTimeout(CallTimeout):
+    """The PKCS#11 driver accepted a call and never returned.
+
+    Seen for real: two threads inside libidplug deadlock - the notifier holds
+    the driver's global lock while parked in SCardGetStatusChange, and the
+    caller spins for that lock. Only a reboot clears it.
+    """
+
+
+class BoundedCaller:
+    """Runs a blocking call under a deadline, and remembers a wedged one.
+
+    A C call stuck inside a driver cannot be cancelled from Python, so the
+    thread running it is abandoned. That is remembered: the frontend re-polls
+    every 15s, and without this each poll would strand another thread against
+    a driver that is never going to answer.
+    """
+
+    def __init__(self, name, timeout_error=CallTimeout):
+        self.name = name
+        self.timeout_error = timeout_error
+        self._lock = threading.Lock()
+        self._inflight = None
+
+    def reset(self):
+        with self._lock:
+            self._inflight = None
+
+    def call(self, func, timeout):
+        with self._lock:
+            if self._inflight is not None and self._inflight.is_alive():
+                raise self.timeout_error(f'a previous {self.name} call is still blocked')
+            self._inflight = None
+
+        outcome = {}
+
+        def run():
+            try:
+                outcome['value'] = func()
+            except BaseException as exc:        # carried across to the caller
+                outcome['error'] = exc
+
+        worker = threading.Thread(target=run, daemon=True, name=f'bounded-{self.name}')
+        worker.start()
+        worker.join(timeout)
+
+        if worker.is_alive():
+            with self._lock:
+                self._inflight = worker
+            raise self.timeout_error(f'no answer from {self.name} within {timeout:g}s')
+
+        if 'error' in outcome:
+            raise outcome['error']
+        return outcome.get('value')
+
+
+# A single get_slots() call. SLOT_SETTLE_TIMEOUT and SLOT_WAIT_TIMEOUT bound
+# their polling loops, but both are checked only *between* calls - so a call
+# that never returns was never bounded by anything.
+PKCS11_CALL_TIMEOUT = 20.0
+
+_pkcs11_caller = BoundedCaller('card driver', DriverTimeout)
+
+
+def get_slots(lib):
+    """lib.get_slots(), under a deadline. Raises DriverTimeout if it wedges."""
+    return _pkcs11_caller.call(lambda: lib.get_slots(token_present=True),
+                               PKCS11_CALL_TIMEOUT)
+
+
 # The Idemia driver discovers the card's applications progressively: a cold
 # get_slots() returns only slot 1, and slots 2 (ADVANCED SIGNATURE) and 3 (QSCD)
 # show up ~20s later. A single snapshot loses that race and reports "slot not found".
@@ -105,7 +183,7 @@ def find_slot(lib, slot_id, timeout=SLOT_WAIT_TIMEOUT, poll_interval=SLOT_POLL_I
     deadline = now() + timeout
     seen = []
     while True:
-        slots = lib.get_slots(token_present=True)
+        slots = get_slots(lib)
         seen = [s.slot_id for s in slots]
         for slot in slots:
             if slot.slot_id == slot_id:
@@ -142,19 +220,13 @@ def clear_slot_cache():
 # healthy service needs. TimeoutBudgetTests holds the two files to this.
 DETECT_TIMEOUT = 4.0
 
-_detect_lock = threading.Lock()
-_detect_inflight = None      # a scan that blew its deadline and may never return
-
-
-class DetectTimeout(Exception):
-    """Reader detection did not finish within its deadline."""
+_detect_caller = BoundedCaller('reader detection', DetectTimeout)
 
 
 def reset_detection_state():
     """Forget a wedged scan. For tests, and for a caller that knows better."""
-    global _detect_inflight
-    with _detect_lock:
-        _detect_inflight = None
+    _detect_caller.reset()
+    _pkcs11_caller.reset()
 
 
 def detect_reader(timeout=None):
@@ -169,35 +241,10 @@ def detect_reader(timeout=None):
     and remembered, because the frontend re-polls every 15s and would
     otherwise pile up one abandoned thread per poll against a wedged service.
     """
-    global _detect_inflight
     timeout = DETECT_TIMEOUT if timeout is None else timeout
+    readers = _detect_caller.call(pcsc.list_readers, timeout)
 
-    with _detect_lock:
-        if _detect_inflight is not None and _detect_inflight.is_alive():
-            raise DetectTimeout('a previous reader scan is still blocked')
-        _detect_inflight = None
-
-    outcome = {}
-
-    def scan():
-        try:
-            outcome['readers'] = pcsc.list_readers()
-        except BaseException as exc:          # carried across to the caller
-            outcome['error'] = exc
-
-    worker = threading.Thread(target=scan, daemon=True, name='pcsc-detect')
-    worker.start()
-    worker.join(timeout)
-
-    if worker.is_alive():
-        with _detect_lock:
-            _detect_inflight = worker
-        raise DetectTimeout(f'no answer from PC/SC within {timeout:g}s')
-
-    if 'error' in outcome:
-        raise outcome['error']
-
-    for name, card_present in outcome.get('readers', []):
+    for name, card_present in readers or []:
         if card_present:
             return name, True
     return None, False
@@ -218,7 +265,11 @@ def enumerate_slots(lib, settle_timeout=SLOT_SETTLE_TIMEOUT, poll_interval=SLOT_
 
     while True:
         try:
-            slots = lib.get_slots(token_present=True)
+            slots = get_slots(lib)
+        except DriverTimeout:
+            # Not "no slots yet" - the driver is wedged and more polling will
+            # not help. Anything else here is still treated as a slow card.
+            raise
         except Exception:
             slots = []
 
@@ -621,6 +672,14 @@ def api_slots():
 
         try:
             slot_info = enumerate_slots(pkcs11.lib(lib_path))
+        except DriverTimeout:
+            # The driver took the call and never came back. More polling will
+            # not help and neither will re-seating the card: in every observed
+            # case only a reboot cleared it, so say that rather than leaving
+            # the user retrying a spinner.
+            return jsonify({'slots': [], 'code': 'driver_wedged',
+                            'error': 'The card driver stopped responding. '
+                                     'Please restart your Mac and try again.'})
         except Exception as e:
             # The one case that genuinely points at the PKCS#11 library: it
             # would not load, or the driver behind it refused to talk.
