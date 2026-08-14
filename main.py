@@ -6,6 +6,7 @@ Wraps the Flask web app in a native macOS window using PyWebView
 
 import sys
 import os
+import signal
 import threading
 import socket
 import time
@@ -112,7 +113,42 @@ def wait_for_server(port, timeout=30):
     return False
 
 
+TERMINATING_SIGNALS = {signal.SIGTERM, signal.SIGINT}
+
+
+def _on_signal():
+    """Drain in-flight card work, then exit.
+
+    Dying inside a PKCS#11 call wedges the Idemia driver until the Mac is
+    restarted - for every process on the machine, not just this one. Closing
+    the window is handled separately; this covers being killed, which is what
+    scripts/verify-release-archive.sh does to the bundle it just built. With a
+    card in the reader that lands mid-enumeration, so the release check was
+    manufacturing the very wedge it exists to catch.
+
+    Waits in a dedicated thread rather than a signal.signal handler. Python
+    runs such handlers on the main thread, and ours never leaves pywebview's
+    Cocoa event loop - so the handler never fires while the default
+    disposition has already been replaced. Measured: that combination made
+    the app immune to SIGTERM, still serving requests a minute later. Blocking
+    the signals everywhere and waiting for them here works whatever the main
+    thread is doing.
+
+    Exits with os._exit: SystemExit raised out here cannot unwind the main
+    thread either. Draining the driver is the only cleanup that matters, and
+    it has already happened by then. Bounded, because a wedged call never
+    returns and refusing to die would be worse.
+    """
+    signal.sigwait(list(TERMINATING_SIGNALS))
+    wait_for_driver()
+    os._exit(0)
+
+
 def main():
+    # Must happen before any other thread starts, so they inherit the mask.
+    signal.pthread_sigmask(signal.SIG_BLOCK, TERMINATING_SIGNALS)
+    threading.Thread(target=_on_signal, daemon=True, name='signal-watch').start()
+
     # Find a free port
     port = find_free_port()
 

@@ -1243,6 +1243,39 @@ class MainWiringTests(unittest.TestCase):
         self.assertNotIn('app.wait_for_driver', src,
                          "`app` here is the Flask object; this raises at quit time")
 
+    def test_a_terminating_signal_drains_the_driver_before_exiting(self):
+        """`kill` must not cut a PKCS#11 call short either.
+
+        scripts/verify-release-archive.sh launches the bundle and then plainly
+        kills it. With a card in the reader the app is mid-enumeration by then,
+        so our own release check was manufacturing the wedge it exists to
+        guard against.
+        """
+        src = self._main_source()
+        for sig in ('SIGTERM', 'SIGINT'):
+            self.assertIn(sig, src, f"{sig} is not handled; a kill still cuts calls short")
+
+        handler = re.search(r'def _on_signal.*?(?=\ndef |\nif __name__)', src, re.DOTALL)
+        self.assertIsNotNone(handler, "expected an _on_signal watcher in main.py")
+        body = handler.group(0)
+
+        self.assertIn('wait_for_driver', body,
+                      "must drain the driver before exiting")
+        # Measured, both of these the hard way:
+        # - signal.signal handlers run on the main thread, which never leaves
+        #   pywebview's Cocoa loop. Registering one replaces the default
+        #   disposition without ever firing, and the app went immune to
+        #   SIGTERM - still serving requests a minute later.
+        # - sys.exit raises SystemExit, which cannot unwind that loop either.
+        self.assertIn('sigwait', body,
+                      "signal.signal never fires here; wait on a dedicated thread")
+        self.assertIn('pthread_sigmask', src,
+                      "sigwait needs the signals blocked in every thread")
+        self.assertIn('os._exit', body,
+                      "sys.exit cannot unwind the Cocoa loop; use os._exit")
+        self.assertNotIn('sys.exit', body,
+                         "sys.exit here swallows the signal instead of exiting")
+
     def test_the_js_hook_main_calls_is_defined_in_the_template(self):
         src = self._main_source()
         called = re.findall(r"evaluate_js\('(\w+)\(\)'\)", src)
