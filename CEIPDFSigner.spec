@@ -9,6 +9,17 @@ import sys
 
 block_cipher = None
 
+# Semnare optionala. Fara SIGN_IDENTITY setat, build-ul iese ad-hoc exact ca
+# inainte - altfel nimeni fara certificatul de distributie nu ar mai putea
+# construi aplicatia.
+#
+# PyInstaller semneaza fiecare binar pe care il colecteaza (~200 de fisiere).
+# `codesign --deep` pe bundle-ul gata facut NU este un inlocuitor: Apple il
+# documenteaza ca nesigur si depreciat, iar binarele interioare nesemnate
+# corect sunt exact ce respinge notarizarea.
+SIGN_IDENTITY = os.environ.get('SIGN_IDENTITY') or None
+ENTITLEMENTS = os.path.join(os.getcwd(), 'entitlements.plist') if SIGN_IDENTITY else None
+
 # Get the path to site-packages
 import site
 site_packages = site.getsitepackages()[0]
@@ -117,8 +128,8 @@ exe = EXE(
     disable_windowed_traceback=False,
     argv_emulation=False,
     target_arch=None,
-    codesign_identity=None,
-    entitlements_file=None,
+    codesign_identity=SIGN_IDENTITY,
+    entitlements_file=ENTITLEMENTS,
     icon='icon.icns',
 )
 

@@ -127,6 +127,57 @@ else
 fi
 
 echo ""
+echo "--- 2c. Semnatura si notarizarea ---"
+
+# Se verifica arhiva, nu dist/: tichetul de notarizare se lipeste pe .app
+# INAINTE de arhivare, iar daca ordinea e gresita el nu ajunge la utilizator.
+# Aici il vede exact cum il vede si el.
+SIG="$(codesign -dv --verbose=2 "$APP" 2>&1 || true)"
+if printf '%s' "$SIG" | grep -q 'flags=.*adhoc'; then
+    echo "  - build nesemnat (ad-hoc): utilizatorii trec prin System Settings"
+    echo "    la prima deschidere. Pentru un build de distributie ruleaza cu"
+    echo "    SIGN_IDENTITY si NOTARY_PROFILE setate."
+else
+    # Odata ce buildul pretinde ca e semnat, orice abatere este fatala: un
+    # bundle care pare semnat dar pe care Gatekeeper il refuza este mai rau
+    # decat unul ad-hoc, pentru ca instructiunile noastre nu il mai acopera.
+    if printf '%s' "$SIG" | grep -q 'Authority=Developer ID Application'; then
+        pass "semnat cu Developer ID Application"
+    else
+        fail "semnatura nu este Developer ID Application"
+    fi
+
+    if printf '%s' "$SIG" | grep -q 'flags=.*runtime'; then
+        pass "Hardened Runtime activ"
+    else
+        fail "Hardened Runtime lipseste - notarizarea il cere"
+    fi
+
+    # Fara acest entitlement aplicatia nu porneste deloc sub Hardened Runtime:
+    # nu isi incarca nici propriul Python, si cu atat mai putin PKCS#11-ul
+    # IDEMIA, semnat de alt team.
+    if codesign -d --entitlements - "$APP" 2>/dev/null | grep -q 'disable-library-validation'; then
+        pass "entitlementul pentru biblioteca IDEMIA este prezent"
+    else
+        fail "lipseste com.apple.security.cs.disable-library-validation"
+    fi
+
+    if xcrun stapler validate "$APP" >/dev/null 2>&1; then
+        pass "tichetul de notarizare este lipit"
+    else
+        fail "tichet de notarizare lipsa sau invalid (stapler validate a esuat)"
+    fi
+
+    # Verdictul care conteaza: exact ce evalueaza macOS la prima deschidere.
+    if spctl -a -t exec -vvv "$APP" 2>&1 | grep -q 'accepted'; then
+        pass "Gatekeeper ACCEPTA aplicatia"
+    else
+        fail "Gatekeeper respinge aplicatia:"
+        spctl -a -t exec -vvv "$APP" 2>&1 | sed 's/^/      /' | head -4
+    fi
+fi
+
+echo ""
 echo "--- 3. Modulele native Python (_struct & co.) ---"
 
 # lib-dynload e accesibil doar prin symlink-ul python3.X -> python3__dot__X

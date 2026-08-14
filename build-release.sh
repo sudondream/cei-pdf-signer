@@ -13,8 +13,59 @@ echo "=== CEI PDF Signer - Release Build ==="
 echo "Versiune: $VERSION"
 echo ""
 
-# Ruleaza build-ul normal
+# Ruleaza build-ul normal (semneaza binarele interioare daca SIGN_IDENTITY e setat)
 ./build.sh
+
+APP="dist/CEI PDF Signer.app"
+
+# --- Semnare si notarizare (optionale) -------------------------------------
+#
+#   SIGN_IDENTITY   "Developer ID Application: Nume (TEAMID)"
+#   NOTARY_PROFILE  numele profilului salvat cu `notarytool store-credentials`
+#
+# Fara ele, build-ul iese ad-hoc ca inainte si utilizatorii trec prin
+# System Settings la prima deschidere.
+if [ -n "${SIGN_IDENTITY:-}" ]; then
+    echo ""
+    echo "Semnez bundle-ul cu Hardened Runtime..."
+
+    # Bundle-ul exterior, dupa ce PyInstaller a semnat interiorul. --timestamp
+    # este ce face semnatura sa ramana valida dupa expirarea certificatului:
+    # Gatekeeper compara data semnarii cu valabilitatea certificatului.
+    #
+    # Entitlement-ul nu este optional. Masurat: cu Hardened Runtime si fara el
+    # aplicatia nu porneste deloc, nu isi incarca nici propriul Python
+    # ("different Team IDs"). Iar biblioteca PKCS#11 a IDEMIA ramane semnata de
+    # alt team (X28J878QBZ) oricum am semna noi.
+    codesign --force --options runtime --timestamp \
+        --entitlements entitlements.plist \
+        --sign "$SIGN_IDENTITY" "$APP"
+
+    codesign --verify --strict --verbose=2 "$APP"
+    echo "  semnat: $(codesign -dv --verbose=2 "$APP" 2>&1 | grep -E '^Authority' | head -1)"
+
+    if [ -n "${NOTARY_PROFILE:-}" ]; then
+        echo ""
+        echo "Trimit la notarizare (dureaza de obicei 1-5 minute)..."
+        NOTARIZE_ZIP="$(mktemp -d)/upload.zip"
+        ditto -c -k --sequesterRsrc --keepParent "$APP" "$NOTARIZE_ZIP"
+
+        xcrun notarytool submit "$NOTARIZE_ZIP" \
+            --keychain-profile "$NOTARY_PROFILE" --wait
+
+        # Lipirea tichetului se face pe .app, INAINTE de arhiva finala. Un
+        # ticket lipit dupa arhivare nu ajunge la utilizator, iar verificarea
+        # offline pica.
+        echo "Lipesc tichetul..."
+        xcrun stapler staple "$APP"
+        xcrun stapler validate "$APP"
+    else
+        echo ""
+        echo "ATENTIE: NOTARY_PROFILE nu este setat - aplicatia e semnata dar"
+        echo "NENOTARIZATA. Gatekeeper o refuza in continuare. Semnatura singura"
+        echo "nu este suficienta."
+    fi
+fi
 
 # Creeaza directorul pentru release
 RELEASE_DIR="release"
