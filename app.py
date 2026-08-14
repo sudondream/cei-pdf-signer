@@ -133,7 +133,14 @@ def clear_slot_cache():
 # watched a call sit in SCardGetStatusChange for 2048 seconds, released only by
 # physically re-plugging the reader. SCardEstablishContext and SCardListReaders
 # take no timeout argument, so the deadline has to be imposed from outside.
-DETECT_TIMEOUT = 10.0
+#
+# This has to be read together with SLOT_SETTLE_TIMEOUT: a single /api/slots
+# call can spend both, one after the other, and the frontend aborts the request
+# at 30s. At 10s here the two summed to exactly that abort, so a slow poll was
+# cut off in the browser and the user saw the generic "Reader timeout" instead
+# of the specific message this endpoint had prepared. 4s is still ~1000x what a
+# healthy service needs. TimeoutBudgetTests holds the two files to this.
+DETECT_TIMEOUT = 4.0
 
 _detect_lock = threading.Lock()
 _detect_inflight = None      # a scan that blew its deadline and may never return

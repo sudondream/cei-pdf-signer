@@ -1117,6 +1117,39 @@ class DetectTimeoutTests(unittest.TestCase):
                              ('Idemia Reader', True))
 
 
+class TimeoutBudgetTests(unittest.TestCase):
+    """The server must answer before the browser gives up on it.
+
+    /api/slots spends its time in two places: reader detection, then PKCS#11
+    slot enumeration. Their deadlines used to sum to exactly the frontend's
+    abort, so a slow-but-successful poll was cut off client-side and the user
+    got the generic "Reader timeout - Click to retry" instead of the specific
+    message the server had prepared. The two numbers live in different files
+    and drifted apart unnoticed; this reads both.
+    """
+
+    MARGIN = 5.0   # room for request overhead and a slow first paint
+
+    def _client_abort_seconds(self):
+        here = os.path.dirname(os.path.abspath(__file__))
+        with open(os.path.join(here, 'templates', 'index.html')) as fh:
+            src = fh.read()
+        match = re.search(r'controller\.abort\(\),\s*(\d+)\)', src)
+        self.assertIsNotNone(match, "could not find the frontend's abort timeout")
+        return int(match.group(1)) / 1000.0
+
+    def test_worst_case_response_fits_inside_the_client_abort(self):
+        budget = app_module.DETECT_TIMEOUT + app_module.SLOT_SETTLE_TIMEOUT
+        self.assertLessEqual(
+            budget, self._client_abort_seconds() - self.MARGIN,
+            f"server can take up to {budget:g}s but the browser aborts at "
+            f"{self._client_abort_seconds():g}s; the user would never see the real error")
+
+    def test_detection_deadline_is_generous_against_a_healthy_service(self):
+        """PC/SC answers in milliseconds; the deadline only catches a wedge."""
+        self.assertGreaterEqual(app_module.DETECT_TIMEOUT, 2.0)
+
+
 class SlotsErrorCodeTests(unittest.TestCase):
     """/api/slots reports a typed code; the badge must not parse prose.
 

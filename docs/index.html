@@ -193,6 +193,12 @@
             box-shadow: 0 8px 30px rgba(0, 0, 0, 0.35);
         }
 
+        .fl-hint {
+            margin-top: 0.5rem;
+            font-size: 0.85rem;
+            opacity: 0.75;
+        }
+
         .fl-verify {
             max-width: 46rem;
             margin: 3rem auto 0;
@@ -785,6 +791,17 @@
                 <div>
                     <p data-lang="en">Open <strong>System Settings &rarr; Privacy &amp; Security</strong> and scroll down to the <em>Security</em> section. The app is listed there as blocked. Click <strong>Open Anyway</strong>.</p>
                     <p data-lang="ro">Deschide <strong>System Settings &rarr; Privacy &amp; Security</strong> si deruleaza pana la sectiunea <em>Security</em>. Aplicatia apare acolo ca blocata. Apasa <strong>Open Anyway</strong>.</p>
+                    <p style="margin-top:0.75rem;">
+                        <a class="btn btn-secondary" href="x-apple.systempreferences:com.apple.settings.PrivacySecurity.extension">
+                            <span>⚙️</span>
+                            <span data-lang="en">Open Privacy &amp; Security for me</span>
+                            <span data-lang="ro">Deschide-mi Privacy &amp; Security</span>
+                        </a>
+                    </p>
+                    <p class="fl-hint">
+                        <span data-lang="en">Your browser will ask whether to allow this page to open System Settings — say yes. If nothing happens, open it by hand as described above.</span>
+                        <span data-lang="ro">Browserul te va intreba daca permiti paginii sa deschida System Settings — accepta. Daca nu se intampla nimic, deschide-l manual, cum este descris mai sus.</span>
+                    </p>
                 </div>
                 <img class="fl-shot" src="first-launch-2-open-anyway.png" alt="The Open Anyway button in Privacy and Security settings" loading="lazy" onerror="this.remove()">
             </div>
