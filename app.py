@@ -19,6 +19,9 @@ from flask import Flask, render_template, request, jsonify, send_file
 from flask_cors import CORS
 from werkzeug.utils import secure_filename
 
+# Reader detection through PCSC.framework, which ships with macOS.
+import pcsc
+
 # PKCS#11 imports - python-pkcs11 talks to the card. PyKCS11 used to sit here
 # too; it is gone. Nothing called it after the switch, and its wildcard import
 # dumped ~200 CK* constants into this module's namespace.
@@ -69,10 +72,6 @@ app = Flask(__name__, template_folder=template_folder)
 CORS(app)
 app.config['MAX_CONTENT_LENGTH'] = 50 * 1024 * 1024  # 50MB max
 app.config['UPLOAD_FOLDER'] = tempfile.mkdtemp()
-
-# Ensure /usr/local/bin is in PATH (needed for opensc-tool in bundled app)
-if '/usr/local/bin' not in os.environ.get('PATH', ''):
-    os.environ['PATH'] = '/usr/local/bin:' + os.environ.get('PATH', '')
 
 # Default PKCS#11 library for Romanian CEI
 DEFAULT_PKCS11_LIB = "/Library/Application Support/com.idemia.idplug/lib/libidplug-pkcs11.2.7.0.dylib"
@@ -130,34 +129,70 @@ def clear_slot_cache():
         _slot_cache.clear()
 
 
-def detect_reader():
+# PC/SC normally answers in milliseconds. It can also block: this project has
+# watched a call sit in SCardGetStatusChange for 2048 seconds, released only by
+# physically re-plugging the reader. SCardEstablishContext and SCardListReaders
+# take no timeout argument, so the deadline has to be imposed from outside.
+DETECT_TIMEOUT = 10.0
+
+_detect_lock = threading.Lock()
+_detect_inflight = None      # a scan that blew its deadline and may never return
+
+
+class DetectTimeout(Exception):
+    """Reader detection did not finish within its deadline."""
+
+
+def reset_detection_state():
+    """Forget a wedged scan. For tests, and for a caller that knows better."""
+    global _detect_inflight
+    with _detect_lock:
+        _detect_inflight = None
+
+
+def detect_reader(timeout=None):
     """Return (reader_name, card_present) via PC/SC.
 
     Instant, and works alongside CryptoTokenKit - unlike PKCS#11 enumeration,
     which is slow. Used as a cheap gate before the expensive part.
+
+    Raises pcsc.PCSCError if the PC/SC service cannot be reached, and
+    DetectTimeout if it accepts the call but never answers. A blocked C call
+    cannot be cancelled from Python, so the thread running it is abandoned -
+    and remembered, because the frontend re-polls every 15s and would
+    otherwise pile up one abandoned thread per poll against a wedged service.
     """
-    result = subprocess.run(['opensc-tool', '--list-readers'],
-                            capture_output=True, text=True, timeout=10)
-    output = result.stdout.strip()
-    if not output or 'No smart card readers' in output:
-        return None, False
+    global _detect_inflight
+    timeout = DETECT_TIMEOUT if timeout is None else timeout
 
-    for line in output.split('\n'):
-        line = line.strip()
-        if not line or line.startswith('#') or line.startswith('Nr.'):
-            continue
-        parts = line.split(None, 3)  # nr, card_present, features, name
-        if len(parts) < 2:
-            continue
+    with _detect_lock:
+        if _detect_inflight is not None and _detect_inflight.is_alive():
+            raise DetectTimeout('a previous reader scan is still blocked')
+        _detect_inflight = None
+
+    outcome = {}
+
+    def scan():
         try:
-            slot_nr = int(parts[0])
-        except ValueError:
-            continue
-        if parts[1].lower() == 'yes':
-            name = parts[3] if len(parts) >= 4 else (
-                parts[2] if len(parts) >= 3 else f'Reader {slot_nr}')
-            return name, True
+            outcome['readers'] = pcsc.list_readers()
+        except BaseException as exc:          # carried across to the caller
+            outcome['error'] = exc
 
+    worker = threading.Thread(target=scan, daemon=True, name='pcsc-detect')
+    worker.start()
+    worker.join(timeout)
+
+    if worker.is_alive():
+        with _detect_lock:
+            _detect_inflight = worker
+        raise DetectTimeout(f'no answer from PC/SC within {timeout:g}s')
+
+    if 'error' in outcome:
+        raise outcome['error']
+
+    for name, card_present in outcome.get('readers', []):
+        if card_present:
+            return name, True
     return None, False
 
 
@@ -541,22 +576,32 @@ def api_slots():
     is cached per library path, because enumeration costs ~8-20s on a cold
     driver and the frontend polls this every 15s.
     """
+    # Checked before touching the hardware: a build without the binding is
+    # broken for everyone, and saying "no card" would blame the user's reader
+    # for a packaging defect.
+    if not PKCS11_AVAILABLE:
+        return jsonify({'slots': [], 'code': 'pkcs11_missing',
+                        'error': 'PKCS#11 support is missing from this build. '
+                                 'Please reinstall the app.'})
+
     try:
         reader_name, card_present = detect_reader()
-    except FileNotFoundError:
-        return jsonify({'slots': [], 'error': 'opensc-tool not found. Please install OpenSC.'})
-    except subprocess.TimeoutExpired:
-        return jsonify({'slots': [], 'error': 'Reader detection timed out.'})
+    except DetectTimeout as e:
+        return jsonify({'slots': [], 'code': 'detect_timeout',
+                        'error': f'The smart card service stopped responding ({e}). '
+                                 'Unplug the reader and plug it back in.'})
+    except pcsc.PCSCError as e:
+        return jsonify({'slots': [], 'code': 'pcsc_unavailable',
+                        'error': f'macOS smart card service unavailable: {e}'})
     except Exception as e:
-        return jsonify({'slots': [], 'error': f'Error: {str(e)}'})
+        return jsonify({'slots': [], 'code': 'detect_failed',
+                        'error': f'Reader detection failed: {e}'})
 
     if not card_present:
         # Card pulled - drop the cache so the next insert re-enumerates.
         clear_slot_cache()
-        return jsonify({'slots': [], 'error': 'No smart card detected. Please insert your CEI card.'})
-
-    if not PKCS11_AVAILABLE:
-        return jsonify({'slots': [], 'error': 'python-pkcs11 not installed'})
+        return jsonify({'slots': [], 'code': 'no_card',
+                        'error': 'No smart card detected. Please insert your CEI card.'})
 
     lib_path = get_pkcs11_lib_path(request.args.get('pkcs11_path'))
 
@@ -570,11 +615,15 @@ def api_slots():
         try:
             slot_info = enumerate_slots(pkcs11.lib(lib_path))
         except Exception as e:
-            return jsonify({'slots': [], 'error': f'Could not read card slots: {e}'})
+            # The one case that genuinely points at the PKCS#11 library: it
+            # would not load, or the driver behind it refused to talk.
+            return jsonify({'slots': [], 'code': 'pkcs11_error',
+                            'error': f'Could not read card slots: {e}'})
 
         if not slot_info:
-            return jsonify({'slots': [], 'error':
-                            'Card detected but no PKCS#11 slots available. Re-seat the card and retry.'})
+            return jsonify({'slots': [], 'code': 'no_slots',
+                            'error': 'Card detected but no PKCS#11 slots available. '
+                                     'Re-seat the card and retry.'})
 
         for slot in slot_info:
             slot['model'] = reader_name or ''

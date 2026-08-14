@@ -26,6 +26,10 @@ a = Analysis(
     ],
     hiddenimports=[
         'app',
+        # Reader detection. Listed explicitly for the same reason 'app' is:
+        # this bundle is assembled from hidden imports, and a module that only
+        # gets reached at runtime is a module that can silently go missing.
+        'pcsc',
         'flask',
         'flask_cors',
         'werkzeug',

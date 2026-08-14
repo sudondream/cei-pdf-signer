@@ -948,8 +948,8 @@
     <div class="header">
         <h1>CEI PDF Signer</h1>
         <div class="header-status">
-            <span id="pkcs11-warning" class="pkcs11-warning" onclick="openSettings()" title="PKCS#11 library not found - Click to configure">
-                <span>&#9888;</span><span>PKCS#11 not found</span>
+            <span id="pkcs11-warning" class="pkcs11-warning" onclick="openSettings()" title="Click to configure the PKCS#11 library path">
+                <span>&#9888;</span><span id="pkcs11-warning-text">PKCS#11 not found</span>
             </span>
             <button class="settings-btn" onclick="openSettings()" title="Settings">&#9881;</button>
             <span id="card-status" class="status-badge searching" onclick="detectCard()">
@@ -1237,19 +1237,27 @@
             document.getElementById('pkcs11-path').value = DEFAULT_PKCS11_PATH;
         }
 
+        // This badge opens the library-path dialog, so it may only appear for
+        // the one state that dialog can actually fix: a library that would not
+        // load. Matching on error prose instead once lit it for a missing
+        // command-line tool and sent people to reconfigure a path that was
+        // never consulted. A missing python-pkcs11 binding is deliberately not
+        // here - that is a broken build, and no path the user types repairs it.
+        const PKCS11_WARNING_TEXT = {
+            pkcs11_error: 'PKCS#11 library unreadable',
+        };
+
         async function checkPkcs11Status() {
             const warningEl = document.getElementById('pkcs11-warning');
+            const warningTextEl = document.getElementById('pkcs11-warning-text');
             try {
                 const pkcs11Path = getPkcs11Path();
-                const response = await fetch('/api/status');
-                const data = await response.json();
-
-                // Check if the configured path exists
-                // We need to check the actual configured path, not just the default
                 const slotsResponse = await fetch('/api/slots?pkcs11_path=' + encodeURIComponent(pkcs11Path));
                 const slotsData = await slotsResponse.json();
 
-                if (slotsData.error && slotsData.error.includes('not found')) {
+                const text = PKCS11_WARNING_TEXT[slotsData.code];
+                if (text) {
+                    warningTextEl.textContent = text;
                     warningEl.classList.add('visible');
                 } else {
                     warningEl.classList.remove('visible');
@@ -1892,19 +1900,31 @@
                 clearTimeout(timeoutId);
                 const data = await response.json();
 
-                if (data.error && !data.slots) {
+                const slots = data.slots || [];
+
+                // Anything other than a plain empty reader gets the server's
+                // own words. The old guard here was `!data.slots`, which is
+                // always false because [] is truthy - so every typed error
+                // fell through and was announced as "No card", including a
+                // dead PC/SC service and a broken install.
+                if (slots.length === 0 && data.code && data.code !== 'no_card') {
+                    cardFound = false;
+                    availableSlots = [];
                     statusEl.className = 'status-badge disconnected';
-                    statusEl.innerHTML = '<span>Error - Click to retry</span>';
+                    statusEl.textContent = data.error || 'Error - Click to retry';
+                    statusEl.title = data.error || '';
+                    updateSignButton();
                     hideLoadingScreen();
                     isDetecting = false;
                     return false;
                 }
 
-                if (!data.slots || data.slots.length === 0) {
+                if (slots.length === 0) {
                     cardFound = false;
                     availableSlots = [];
                     statusEl.className = 'status-badge disconnected';
                     statusEl.innerHTML = '<span>No card - Click to retry</span>';
+                    statusEl.title = '';
                     updateSignButton();
                     hideLoadingScreen();
                     isDetecting = false;

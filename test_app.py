@@ -11,14 +11,18 @@ These cover the two defects that produced "0 of 3 signed, empty zip":
 
 No smart card required.
 """
+import ctypes
 import os
 import re
 import tempfile
+import threading
+import time
 import unittest
 import zipfile
 from unittest import mock
 
 import app as app_module
+import pcsc
 
 
 class FakeSlot:
@@ -897,6 +901,331 @@ class RomanianDiacriticsTests(unittest.TestCase):
         payload = app_module.app.test_client().get('/api/status').get_json()
         self.assertTrue(payload['signature_font_embedded'],
                         f"font not active: {payload.get('signature_font_path')}")
+
+
+class FakePCSC:
+    """Stands in for PCSC.framework.
+
+    Only the four entry points list_readers() calls. Scripted return codes let
+    a test drive the failure branches without unplugging real hardware.
+    """
+
+    def __init__(self, readers=(), establish_rv=pcsc.SCARD_S_SUCCESS,
+                 list_rv=pcsc.SCARD_S_SUCCESS, status_rv=pcsc.SCARD_S_SUCCESS):
+        # Names are kept as raw bytes, the way PC/SC hands them over: they are
+        # vendor strings with no encoding guarantee.
+        self.readers = [(n if isinstance(n, bytes) else n.encode(), present)
+                        for n, present in readers]
+        self.establish_rv = establish_rv
+        self.list_rv = list_rv
+        self.status_rv = status_rv
+        self.insufficient_buffer_once = False
+        self.released = []
+
+    def _blob(self):
+        # PC/SC hands back NUL-separated names terminated by a second NUL.
+        return b''.join(name + b'\x00' for name, _ in self.readers) + b'\x00'
+
+    def SCardEstablishContext(self, scope, res1, res2, ctx_ref):
+        if self.establish_rv == pcsc.SCARD_S_SUCCESS:
+            ctx_ref._obj.value = 7
+        return self.establish_rv
+
+    def SCardListReaders(self, ctx, groups, buf, size_ref):
+        if self.list_rv != pcsc.SCARD_S_SUCCESS:
+            return self.list_rv
+        blob = self._blob()
+        # A reader appearing between the sizing call and the data call leaves
+        # the caller holding a buffer that is now too small.
+        if buf is not None and self.insufficient_buffer_once:
+            self.insufficient_buffer_once = False
+            return pcsc.SCARD_E_INSUFFICIENT_BUFFER
+        size_ref._obj.value = len(blob)
+        if buf is not None:
+            ctypes.memmove(buf, blob, len(blob))
+        return pcsc.SCARD_S_SUCCESS
+
+    def SCardGetStatusChange(self, ctx, timeout, states_ref, count):
+        state = states_ref._obj
+        if self.status_rv != pcsc.SCARD_S_SUCCESS:
+            return self.status_rv
+        present = dict(self.readers)[state.szReader]
+        state.dwEventState = (pcsc.SCARD_STATE_PRESENT if present
+                              else pcsc.SCARD_STATE_EMPTY)
+        return pcsc.SCARD_S_SUCCESS
+
+    def SCardReleaseContext(self, ctx):
+        self.released.append(ctx)
+        return pcsc.SCARD_S_SUCCESS
+
+
+class ListReadersTests(unittest.TestCase):
+    """Reader detection talks to PCSC.framework directly.
+
+    It used to shell out to `opensc-tool`, which is not installed on a stock
+    Mac - the resulting error was rendered as "PKCS#11 not found", sending
+    users to reconfigure a library path that was never the problem.
+    """
+
+    def test_reports_each_reader_and_whether_a_card_is_in_it(self):
+        lib = FakePCSC(readers=[('Idemia Reader', True), ('Spare Reader', False)])
+        self.assertEqual(pcsc.list_readers(lib),
+                         [('Idemia Reader', True), ('Spare Reader', False)])
+
+    def test_no_reader_attached_is_a_normal_empty_result(self):
+        """SCARD_E_NO_READERS_AVAILABLE means "none plugged in", not a fault."""
+        lib = FakePCSC(list_rv=pcsc.SCARD_E_NO_READERS_AVAILABLE)
+        self.assertEqual(pcsc.list_readers(lib), [])
+
+    def test_empty_reader_list_yields_nothing(self):
+        self.assertEqual(pcsc.list_readers(FakePCSC(readers=[])), [])
+
+    def test_unreachable_pcsc_service_raises(self):
+        lib = FakePCSC(establish_rv=pcsc.SCARD_E_NO_SERVICE)
+        with self.assertRaises(pcsc.PCSCError):
+            pcsc.list_readers(lib)
+
+    def test_context_is_released_when_listing_fails(self):
+        """A leaked context holds a connection to the PC/SC daemon open."""
+        lib = FakePCSC(list_rv=0x80100001)  # SCARD_F_INTERNAL_ERROR
+        with self.assertRaises(pcsc.PCSCError):
+            pcsc.list_readers(lib)
+        self.assertEqual(lib.released, [7], "context must be released on the error path")
+
+    def test_reader_whose_status_cannot_be_read_is_reported_cardless(self):
+        """One sulking reader must not blind the app to the others."""
+        lib = FakePCSC(readers=[('Idemia Reader', True)], status_rv=0x80100001)
+        self.assertEqual(pcsc.list_readers(lib), [('Idemia Reader', False)])
+
+    def test_service_dying_mid_scan_is_raised_not_swallowed(self):
+        """A dead service must not masquerade as "no card in the reader".
+
+        Reporting it as cardless sends the user to re-seat a card that is
+        already seated - the misdirection this module exists to end.
+        """
+        lib = FakePCSC(readers=[('Idemia Reader', True)],
+                       status_rv=pcsc.SCARD_E_NO_SERVICE)
+        with self.assertRaises(pcsc.PCSCError):
+            pcsc.list_readers(lib)
+
+    def test_reader_appearing_mid_scan_is_retried_not_fatal(self):
+        """Plugging a reader between the sizing and data calls invalidates the
+        buffer. PC/SC says SCARD_E_INSUFFICIENT_BUFFER; the service is fine."""
+        lib = FakePCSC(readers=[('Late Reader', True)])
+        lib.insufficient_buffer_once = True
+        self.assertEqual(pcsc.list_readers(lib), [('Late Reader', True)])
+
+    def test_reader_name_that_is_not_utf8_does_not_explode(self):
+        """Reader names are vendor strings, with no encoding guarantee.
+
+        The name must still round-trip to SCardGetStatusChange as the exact
+        bytes PC/SC gave us, or the card behind it goes unseen - so decoding
+        is for display only.
+        """
+        lib = FakePCSC(readers=[(b'Idemia \xff\xfe Reader', True)])
+        self.assertEqual([present for _, present in pcsc.list_readers(lib)], [True])
+        name = pcsc.list_readers(lib)[0][0]
+        self.assertIn('Idemia', name)
+
+    def test_context_is_released_on_success(self):
+        lib = FakePCSC(readers=[('Idemia Reader', True)])
+        pcsc.list_readers(lib)
+        self.assertEqual(lib.released, [7])
+
+
+class DetectReaderTests(unittest.TestCase):
+    """app.detect_reader keeps its (name, card_present) contract."""
+
+    def test_returns_the_reader_holding_a_card(self):
+        readers = [('Empty Reader', False), ('Idemia Reader', True)]
+        with mock.patch.object(app_module.pcsc, 'list_readers', return_value=readers):
+            self.assertEqual(app_module.detect_reader(), ('Idemia Reader', True))
+
+    def test_reader_without_a_card_reports_absence(self):
+        with mock.patch.object(app_module.pcsc, 'list_readers',
+                               return_value=[('Idemia Reader', False)]):
+            self.assertEqual(app_module.detect_reader(), (None, False))
+
+    def test_no_readers_at_all_reports_absence(self):
+        with mock.patch.object(app_module.pcsc, 'list_readers', return_value=[]):
+            self.assertEqual(app_module.detect_reader(), (None, False))
+
+
+class DetectTimeoutTests(unittest.TestCase):
+    """Detection must stay bounded.
+
+    The old subprocess carried timeout=10. The PC/SC calls that replaced it
+    take no timeout argument at all, and this project has watched PC/SC block
+    for 2048 seconds, released only by re-plugging the reader. Without a
+    deadline the Flask worker blocks forever while the frontend re-polls every
+    15s, stacking up threads that never come back.
+    """
+
+    def setUp(self):
+        app_module.reset_detection_state()
+        self.addCleanup(app_module.reset_detection_state)
+
+    def test_detection_that_never_returns_gives_up(self):
+        started = threading.Event()
+
+        def wedged():
+            started.set()
+            time.sleep(30)
+
+        with mock.patch.object(app_module.pcsc, 'list_readers', side_effect=wedged):
+            with self.assertRaises(app_module.DetectTimeout):
+                app_module.detect_reader(timeout=0.2)
+        self.assertTrue(started.wait(1), "detection never actually ran")
+
+    def test_a_wedged_scan_is_not_joined_by_a_second_one(self):
+        """The frontend re-polls every 15s; one stuck scan must not become ten."""
+        release = threading.Event()
+        calls = []
+
+        def wedged():
+            calls.append(1)
+            release.wait(30)
+            return []
+
+        with mock.patch.object(app_module.pcsc, 'list_readers', side_effect=wedged):
+            for _ in range(3):
+                with self.assertRaises(app_module.DetectTimeout):
+                    app_module.detect_reader(timeout=0.2)
+        release.set()
+        self.assertEqual(len(calls), 1,
+                         "each poll started another thread against a wedged service")
+
+    def test_timeout_is_reported_under_its_own_code(self):
+        def wedged():
+            time.sleep(30)
+
+        with mock.patch.object(app_module.pcsc, 'list_readers', side_effect=wedged), \
+             mock.patch.object(app_module, 'DETECT_TIMEOUT', 0.2):
+            payload = app_module.app.test_client().get('/api/slots').get_json()
+        self.assertEqual(payload['code'], 'detect_timeout')
+
+    def test_detection_recovers_once_the_service_answers_again(self):
+        with mock.patch.object(app_module.pcsc, 'list_readers',
+                               side_effect=lambda: time.sleep(30)):
+            with self.assertRaises(app_module.DetectTimeout):
+                app_module.detect_reader(timeout=0.2)
+
+        app_module.reset_detection_state()
+        with mock.patch.object(app_module.pcsc, 'list_readers',
+                               return_value=[('Idemia Reader', True)]):
+            self.assertEqual(app_module.detect_reader(timeout=5),
+                             ('Idemia Reader', True))
+
+
+class SlotsErrorCodeTests(unittest.TestCase):
+    """/api/slots reports a typed code; the badge must not parse prose.
+
+    The frontend used to light "PKCS#11 not found" on any error containing the
+    substring "not found", so an unrelated failure pointed users at the PKCS#11
+    settings. Every error carries a machine-readable code instead.
+    """
+
+    def setUp(self):
+        app_module.app.config['TESTING'] = True
+        self.client = app_module.app.test_client()
+        app_module.clear_slot_cache()
+        self.addCleanup(app_module.clear_slot_cache)
+
+    def test_pcsc_failure_is_not_reported_as_a_pkcs11_problem(self):
+        with mock.patch.object(app_module, 'detect_reader',
+                               side_effect=pcsc.PCSCError('service down')):
+            payload = self.client.get('/api/slots').get_json()
+        self.assertEqual(payload['code'], 'pcsc_unavailable')
+        self.assertNotIn('PKCS', payload['error'],
+                         "a PC/SC fault must not be blamed on PKCS#11")
+
+    def test_absent_card_is_coded(self):
+        with mock.patch.object(app_module, 'detect_reader', return_value=(None, False)):
+            payload = self.client.get('/api/slots').get_json()
+        self.assertEqual(payload['code'], 'no_card')
+
+    def test_unreadable_pkcs11_library_is_coded_as_such(self):
+        with mock.patch.object(app_module, 'detect_reader', return_value=('R', True)), \
+             mock.patch.object(app_module.pkcs11, 'lib', side_effect=OSError('image not found')):
+            payload = self.client.get('/api/slots').get_json()
+        self.assertEqual(payload['code'], 'pkcs11_error')
+
+    def test_missing_pkcs11_binding_is_reported_without_a_card(self):
+        """A build shipped without the binding is broken for everyone.
+
+        Reporting "no card" to someone who has not inserted one yet hides a
+        packaging defect behind a hardware excuse.
+        """
+        with mock.patch.object(app_module, 'PKCS11_AVAILABLE', False), \
+             mock.patch.object(app_module, 'detect_reader', return_value=(None, False)):
+            payload = self.client.get('/api/slots').get_json()
+        self.assertEqual(payload['code'], 'pkcs11_missing')
+
+    def test_success_carries_no_error_code(self):
+        with mock.patch.object(app_module, 'detect_reader', return_value=('R', True)), \
+             mock.patch.object(app_module, 'enumerate_slots',
+                               return_value=[{'id': 2, 'label': 'ADVANCED SIGNATURE PIN'}]), \
+             mock.patch.object(app_module.pkcs11, 'lib', mock.Mock()):
+            payload = self.client.get('/api/slots').get_json()
+        self.assertNotIn('code', payload)
+
+
+class NoOpenscToolTests(unittest.TestCase):
+    """Reader detection must never shell out to opensc-tool again.
+
+    It is absent from a stock macOS install, and the Homebrew path on Apple
+    Silicon (/opt/homebrew/bin) was never on the bundled app's PATH anyway.
+    PCSC.framework ships with the OS and needs nothing installed.
+    """
+
+    # Matches invoking it - a quoted string literal, as it would appear in a
+    # subprocess argument list. Prose explaining why it was dropped stays legal,
+    # the same allowance NoPyKCS11Tests makes.
+    INVOKED = re.compile(r'''["']opensc-tool["']''')
+
+    def test_no_source_invokes_opensc_tool(self):
+        here = os.path.dirname(os.path.abspath(__file__))
+        for filename in ('app.py', 'main.py', 'pcsc.py'):
+            with open(os.path.join(here, filename)) as fh:
+                src = fh.read()
+            self.assertIsNone(self.INVOKED.search(src),
+                              f"{filename} shells out to opensc-tool; "
+                              f"detection must go through PCSC.framework")
+
+    def test_badge_does_not_key_off_error_prose(self):
+        """The bug: any error containing "not found" lit the PKCS#11 warning."""
+        here = os.path.dirname(os.path.abspath(__file__))
+        with open(os.path.join(here, 'templates', 'index.html')) as fh:
+            src = fh.read()
+        self.assertNotIn("includes('not found')", src,
+                         "the badge must switch on the error code, not on prose")
+
+    def test_server_error_messages_are_not_gated_behind_a_dead_branch(self):
+        """`!data.slots` is always false: every error response carries slots: [],
+        and [] is truthy in JS. That swallowed every typed error into the
+        generic "No card" state - the misattribution this all exists to end.
+        """
+        here = os.path.dirname(os.path.abspath(__file__))
+        with open(os.path.join(here, 'templates', 'index.html')) as fh:
+            src = fh.read()
+        # Matches it as a condition, so the comment recording the bug stays legal.
+        dead_guard = re.compile(r'if\s*\([^)]*!data\.slots')
+        self.assertIsNone(dead_guard.search(src),
+                          "guard is always false; test data.slots.length instead")
+
+    def test_unfixable_states_do_not_invite_the_user_into_settings(self):
+        """Only a library the user can repoint belongs on the settings badge.
+
+        A missing python-pkcs11 binding is a packaging defect; offering the
+        library-path dialog for it repeats the original bug in miniature.
+        """
+        here = os.path.dirname(os.path.abspath(__file__))
+        with open(os.path.join(here, 'templates', 'index.html')) as fh:
+            src = fh.read()
+        warning_map = re.search(r'PKCS11_WARNING_TEXT\s*=\s*\{(.*?)\}', src, re.DOTALL)
+        self.assertIsNotNone(warning_map, "PKCS11_WARNING_TEXT not found")
+        self.assertNotIn('pkcs11_missing', warning_map.group(1),
+                         "a build defect must not be presented as a setting to change")
 
 
 if __name__ == '__main__':
