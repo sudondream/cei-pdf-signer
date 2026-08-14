@@ -47,7 +47,15 @@ so there is no Homebrew formula or extra installer to add.
 
 1. Download the latest release from [Releases](../../releases)
 2. Extract and move `CEI PDF Signer.app` to `/Applications`
-3. On first run, right-click → Open (to allow execution)
+3. On first run, macOS refuses to open the app, reporting that it cannot verify it is
+   free of malware. The app is signed ad-hoc rather than with a paid Apple Developer ID,
+   which is what that message means. To open it: double-click the app, press **Done**
+   (not "Move to Trash"), then go to **System Settings → Privacy & Security**, scroll to
+   *Security*, and click **Open Anyway** next to the app's name. Confirm, entering an
+   administrator password if prompted. Subsequent launches are normal.
+
+   Right-clicking the app and choosing "Open" was the shortcut on older macOS versions.
+   Apple removed it, so it no longer works.
 
 #### Option 2: From Source
 
