@@ -57,6 +57,21 @@ so there is no Homebrew formula or extra installer to add.
    Right-clicking the app and choosing "Open" was the shortcut on older macOS versions.
    Apple removed it, so it no longer works.
 
+   A [walkthrough with screenshots](https://sudondream.github.io/cei-pdf-signer/#first-launch)
+   is on the project page.
+
+#### Verifying the download (optional)
+
+macOS says it cannot verify the app because it is not signed with a paid Apple developer
+certificate. If you would rather confirm the download yourself, every release publishes
+`SHA256SUMS.txt` beside the archive. Download both into the same folder and run:
+
+```bash
+cd ~/Downloads && shasum -a 256 -c SHA256SUMS.txt
+```
+
+`OK` means the archive is byte-for-byte the one that was published.
+
 #### Option 2: From Source
 
 ```bash

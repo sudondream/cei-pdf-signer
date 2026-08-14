@@ -122,6 +122,107 @@
             padding: 8rem 2rem 4rem;
         }
 
+        .hero-note {
+            max-width: 46rem;
+            margin: 2rem auto 0;
+            padding: 1rem 1.25rem;
+            border: 1px solid rgba(0, 212, 255, 0.25);
+            border-left: 3px solid var(--accent);
+            border-radius: 8px;
+            background: rgba(0, 212, 255, 0.05);
+            color: var(--text-secondary);
+            font-size: 0.95rem;
+            line-height: 1.6;
+            text-align: left;
+        }
+
+        .hero-note a {
+            color: var(--accent);
+        }
+
+        /* First launch walkthrough */
+        .first-launch {
+            padding: 5rem 2rem;
+            background: var(--bg-secondary);
+        }
+
+        .fl-why {
+            max-width: 46rem;
+            margin: 0 auto 3rem;
+            color: var(--text-secondary);
+            line-height: 1.7;
+        }
+
+        .fl-steps {
+            max-width: 60rem;
+            margin: 0 auto;
+            display: grid;
+            gap: 2.5rem;
+        }
+
+        .fl-step {
+            display: grid;
+            grid-template-columns: 2.5rem 1fr;
+            gap: 1rem 1.25rem;
+            align-items: start;
+        }
+
+        .fl-step .step-number {
+            width: 2.5rem;
+            height: 2.5rem;
+            border-radius: 50%;
+            background: var(--gradient);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-weight: bold;
+            color: #001018;
+        }
+
+        .fl-step p {
+            color: var(--text-secondary);
+            line-height: 1.7;
+        }
+
+        .fl-shot {
+            grid-column: 2;
+            margin-top: 0.75rem;
+            max-width: 100%;
+            border: 1px solid rgba(255, 255, 255, 0.12);
+            border-radius: 10px;
+            box-shadow: 0 8px 30px rgba(0, 0, 0, 0.35);
+        }
+
+        .fl-verify {
+            max-width: 46rem;
+            margin: 3rem auto 0;
+            padding: 1.5rem;
+            background: var(--bg-card);
+            border-radius: 10px;
+        }
+
+        .fl-verify code {
+            display: block;
+            overflow-x: auto;
+            white-space: pre;
+            padding: 0.85rem 1rem;
+            margin-top: 0.75rem;
+            background: rgba(0, 0, 0, 0.35);
+            border-radius: 6px;
+            color: var(--accent);
+            font-size: 0.85rem;
+        }
+
+        @media (max-width: 640px) {
+            .fl-step {
+                grid-template-columns: 1fr;
+            }
+
+            .fl-shot {
+                grid-column: 1;
+            }
+        }
+
         .badge {
             display: inline-flex;
             align-items: center;
@@ -449,6 +550,8 @@
             <a href="#features" data-lang="ro">Functii</a>
             <a href="#install" data-lang="en">Install</a>
             <a href="#install" data-lang="ro">Instalare</a>
+            <a href="#first-launch" data-lang="en">First launch</a>
+            <a href="#first-launch" data-lang="ro">Prima deschidere</a>
             <a href="https://github.com/sudondream/cei-pdf-signer" target="_blank">GitHub</a>
             <div class="lang-toggle">
                 <button class="lang-btn active" onclick="setLang('en')">EN</button>
@@ -478,6 +581,10 @@
                 <span data-lang="ro">Vezi Codul</span>
             </a>
         </div>
+        <p class="hero-note">
+            <span data-lang="en">The first time you open it, macOS will say it cannot verify the app is free of malware. That is expected — the app is not signed with a paid Apple certificate. <a href="#first-launch">Here is how to open it</a>, and how to check the download yourself.</span>
+            <span data-lang="ro">La prima deschidere, macOS va spune ca nu poate verifica daca aplicatia este lipsita de programe daunatoare. Este de asteptat — aplicatia nu este semnata cu un certificat Apple platit. <a href="#first-launch">Iata cum o deschizi</a> si cum poti verifica singur ce ai descarcat.</span>
+        </p>
     </section>
 
     <section class="demo">
@@ -645,12 +752,59 @@
                 <div class="step-content">
                     <h4 data-lang="en">First Launch</h4>
                     <h4 data-lang="ro">Prima Lansare</h4>
-                    <p data-lang="en">macOS will refuse to open it the first time, saying it cannot verify the app is free of malware. This is expected: the app is not signed with a paid Apple certificate. Open it anyway: double-click the app, press <strong>Done</strong> (never "Move to Trash"), then go to <strong>System Settings &rarr; Privacy &amp; Security</strong>, scroll to <em>Security</em>, and click <strong>Open Anyway</strong> next to the app's name. Confirm, and enter an administrator password if asked. Every launch after that is normal.</p>
-                    <p data-lang="ro">La prima deschidere macOS va refuza aplicatia, spunand ca nu poate verifica daca este lipsita de programe daunatoare. Este normal: aplicatia nu este semnata cu un certificat Apple platit. Deschide-o oricum: dublu-click pe aplicatie, apasa <strong>Done</strong> (niciodata "Move to Trash"), apoi mergi in <strong>System Settings &rarr; Privacy &amp; Security</strong>, deruleaza pana la sectiunea <em>Security</em> si apasa <strong>Open Anyway</strong> in dreptul aplicatiei. Confirma si introdu o parola de administrator daca ti se cere. Urmatoarele lansari sunt normale.</p>
-                    <p data-lang="en" style="opacity:0.7;font-size:0.9em;margin-top:0.5rem;">On older macOS versions the shortcut was to right-click the app and choose "Open". That no longer works.</p>
-                    <p data-lang="ro" style="opacity:0.7;font-size:0.9em;margin-top:0.5rem;">Pe versiuni mai vechi de macOS se folosea click dreapta pe aplicatie si "Open". Aceasta metoda nu mai functioneaza.</p>
+                    <p data-lang="en">macOS will refuse to open it the first time, saying it cannot verify the app is free of malware. This is expected, and it takes three clicks to get past — <a href="#first-launch" style="color: var(--accent)">see the walkthrough with screenshots</a>.</p>
+                    <p data-lang="ro">La prima deschidere macOS va refuza aplicatia, spunand ca nu poate verifica daca este lipsita de programe daunatoare. Este de asteptat si se trece in trei clicuri — <a href="#first-launch" style="color: var(--accent)">vezi pasii cu capturi de ecran</a>.</p>
                 </div>
             </div>
+        </div>
+    </section>
+
+    <section class="first-launch" id="first-launch">
+        <h2 class="section-title" data-lang="en">Opening it the first time</h2>
+        <h2 class="section-title" data-lang="ro">Prima deschidere</h2>
+
+        <div class="fl-why">
+            <p data-lang="en">macOS refuses to open this app the first time and says it cannot verify it is free of malware. Nothing is wrong with your download. Apple charges for the developer certificate that would remove this message, and this app does not have one — so macOS reports that it does not recognise the publisher. It says the same thing about every unsigned app.</p>
+            <p data-lang="ro">macOS refuza aplicatia la prima deschidere si spune ca nu poate verifica daca este lipsita de programe daunatoare. Nu este nimic in neregula cu ce ai descarcat. Certificatul de dezvoltator care ar sterge acest mesaj se plateste, iar aplicatia nu il are — asa ca macOS raporteaza ca nu recunoaste editorul. Spune acelasi lucru despre orice aplicatie nesemnata.</p>
+            <p data-lang="en">The whole source code is public, and every release is built from it. If you want to confirm that the file you downloaded is exactly the one that was published, there is a way to check it yourself at the bottom of this page.</p>
+            <p data-lang="ro">Codul sursa este public in intregime, iar fiecare versiune este construita din el. Daca vrei sa confirmi ca fisierul descarcat este exact cel publicat, gasesti mai jos cum sa verifici singur.</p>
+        </div>
+
+        <div class="fl-steps">
+            <div class="fl-step">
+                <div class="step-number">1</div>
+                <div>
+                    <p data-lang="en">Double-click <strong>CEI PDF Signer</strong> in Applications. macOS shows the warning below. Press <strong>Done</strong> — never "Move to Trash".</p>
+                    <p data-lang="ro">Dublu-click pe <strong>CEI PDF Signer</strong> in Applications. macOS afiseaza avertismentul de mai jos. Apasa <strong>Done</strong> — niciodata "Move to Trash".</p>
+                </div>
+                <img class="fl-shot" src="first-launch-1-blocked.png" alt="macOS warning that the app cannot be verified" loading="lazy" onerror="this.remove()">
+            </div>
+
+            <div class="fl-step">
+                <div class="step-number">2</div>
+                <div>
+                    <p data-lang="en">Open <strong>System Settings &rarr; Privacy &amp; Security</strong> and scroll down to the <em>Security</em> section. The app is listed there as blocked. Click <strong>Open Anyway</strong>.</p>
+                    <p data-lang="ro">Deschide <strong>System Settings &rarr; Privacy &amp; Security</strong> si deruleaza pana la sectiunea <em>Security</em>. Aplicatia apare acolo ca blocata. Apasa <strong>Open Anyway</strong>.</p>
+                </div>
+                <img class="fl-shot" src="first-launch-2-open-anyway.png" alt="The Open Anyway button in Privacy and Security settings" loading="lazy" onerror="this.remove()">
+            </div>
+
+            <div class="fl-step">
+                <div class="step-number">3</div>
+                <div>
+                    <p data-lang="en">Confirm once more, entering an administrator password if asked. The app opens, and every launch after this one is normal — you only do this once.</p>
+                    <p data-lang="ro">Confirma inca o data si introdu o parola de administrator daca ti se cere. Aplicatia porneste, iar urmatoarele lansari sunt normale — pasul acesta se face o singura data.</p>
+                </div>
+                <img class="fl-shot" src="first-launch-3-confirm.png" alt="Final confirmation dialog before the app opens" loading="lazy" onerror="this.remove()">
+            </div>
+        </div>
+
+        <div class="fl-verify">
+            <h4 data-lang="en">Checking the download yourself (optional)</h4>
+            <h4 data-lang="ro">Verificarea descarcarii (optional)</h4>
+            <p data-lang="en">Every release publishes a <code style="display:inline;padding:0.15rem 0.4rem;">SHA256SUMS.txt</code> next to the archive. Download it, put it beside the ZIP, and run this in Terminal — <code style="display:inline;padding:0.15rem 0.4rem;">OK</code> means the file is byte-for-byte the one that was published.</p>
+            <p data-lang="ro">Fiecare versiune publica un fisier <code style="display:inline;padding:0.15rem 0.4rem;">SHA256SUMS.txt</code> langa arhiva. Descarca-l, pune-l langa ZIP si ruleaza comanda de mai jos in Terminal — <code style="display:inline;padding:0.15rem 0.4rem;">OK</code> inseamna ca fisierul este identic cu cel publicat.</p>
+            <code>cd ~/Downloads &amp;&amp; shasum -a 256 -c SHA256SUMS.txt</code>
         </div>
     </section>
 
