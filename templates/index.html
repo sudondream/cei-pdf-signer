@@ -1237,13 +1237,14 @@
             document.getElementById('pkcs11-path').value = DEFAULT_PKCS11_PATH;
         }
 
-        // Only these mean the PKCS#11 library is the problem, so only these
-        // may point the user at the library-path setting. Matching on error
-        // prose instead once lit this badge for a missing command-line tool
-        // and sent people to reconfigure a path that was never consulted.
+        // This badge opens the library-path dialog, so it may only appear for
+        // the one state that dialog can actually fix: a library that would not
+        // load. Matching on error prose instead once lit it for a missing
+        // command-line tool and sent people to reconfigure a path that was
+        // never consulted. A missing python-pkcs11 binding is deliberately not
+        // here - that is a broken build, and no path the user types repairs it.
         const PKCS11_WARNING_TEXT = {
             pkcs11_error: 'PKCS#11 library unreadable',
-            pkcs11_missing: 'PKCS#11 support missing',
         };
 
         async function checkPkcs11Status() {
@@ -1899,19 +1900,31 @@
                 clearTimeout(timeoutId);
                 const data = await response.json();
 
-                if (data.error && !data.slots) {
+                const slots = data.slots || [];
+
+                // Anything other than a plain empty reader gets the server's
+                // own words. The old guard here was `!data.slots`, which is
+                // always false because [] is truthy - so every typed error
+                // fell through and was announced as "No card", including a
+                // dead PC/SC service and a broken install.
+                if (slots.length === 0 && data.code && data.code !== 'no_card') {
+                    cardFound = false;
+                    availableSlots = [];
                     statusEl.className = 'status-badge disconnected';
-                    statusEl.innerHTML = '<span>Error - Click to retry</span>';
+                    statusEl.textContent = data.error || 'Error - Click to retry';
+                    statusEl.title = data.error || '';
+                    updateSignButton();
                     hideLoadingScreen();
                     isDetecting = false;
                     return false;
                 }
 
-                if (!data.slots || data.slots.length === 0) {
+                if (slots.length === 0) {
                     cardFound = false;
                     availableSlots = [];
                     statusEl.className = 'status-badge disconnected';
                     statusEl.innerHTML = '<span>No card - Click to retry</span>';
+                    statusEl.title = '';
                     updateSignButton();
                     hideLoadingScreen();
                     isDetecting = false;

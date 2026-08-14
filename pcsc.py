@@ -13,8 +13,21 @@ import ctypes
 PCSC_FRAMEWORK = "/System/Library/Frameworks/PCSC.framework/PCSC"
 
 SCARD_S_SUCCESS = 0x00000000
+SCARD_E_INVALID_HANDLE = 0x80100003
+SCARD_E_INSUFFICIENT_BUFFER = 0x80100008
 SCARD_E_NO_SERVICE = 0x8010001D
+SCARD_E_SERVICE_STOPPED = 0x8010001E
 SCARD_E_NO_READERS_AVAILABLE = 0x8010002E
+
+# Failures of the service itself rather than of one reader. A reader that will
+# not answer can be skipped; these mean nothing further can be trusted, and
+# quietly reporting "no card" for them would send the user to re-seat a card
+# that is already seated.
+SERVICE_LEVEL_ERRORS = frozenset({
+    SCARD_E_NO_SERVICE,
+    SCARD_E_SERVICE_STOPPED,
+    SCARD_E_INVALID_HANDLE,
+})
 
 SCARD_SCOPE_SYSTEM = 0x0002
 
@@ -83,8 +96,15 @@ def load_pcsc():
     return lib
 
 
-def _reader_names(lib, ctx):
-    """Names of every attached reader, via the two-call size-then-data dance."""
+def _reader_names(lib, ctx, _retries=1):
+    """Raw names of every attached reader, via the size-then-data dance.
+
+    Names stay as bytes: they are vendor strings with no encoding guarantee,
+    and they have to go back to SCardGetStatusChange byte-for-byte.
+
+    A reader plugged in between the two calls leaves the buffer too small.
+    That is a stale measurement, not a fault, so the sizing is retried.
+    """
     size = ctypes.c_uint32(0)
 
     rv = _rv(lib.SCardListReaders(ctx, None, None, ctypes.byref(size)))
@@ -95,26 +115,31 @@ def _reader_names(lib, ctx):
 
     buf = ctypes.create_string_buffer(size.value)
     rv = _rv(lib.SCardListReaders(ctx, None, buf, ctypes.byref(size)))
+    if rv == SCARD_E_INSUFFICIENT_BUFFER and _retries > 0:
+        return _reader_names(lib, ctx, _retries - 1)
     if rv == SCARD_E_NO_READERS_AVAILABLE:
         return []
     if rv != SCARD_S_SUCCESS:
         raise PCSCError(f"SCardListReaders failed (0x{rv:08X})")
 
     # A NUL-separated list closed by a second NUL.
-    return [name.decode() for name in buf.raw[:size.value].split(b"\x00") if name]
+    return [name for name in buf.raw[:size.value].split(b"\x00") if name]
 
 
-def _card_present(lib, ctx, name):
+def _card_present(lib, ctx, raw_name):
     """Whether a card sits in this reader right now.
 
-    A reader that will not answer is reported empty rather than fatal: one
-    sulking reader must not hide the others.
+    A reader that will not answer is reported empty rather than fatal - one
+    sulking reader must not hide the others - but a failure of the service
+    itself is raised, so it does not get mistaken for an empty reader.
     """
     state = SCARD_READERSTATE()
-    state.szReader = name.encode()
+    state.szReader = raw_name
     state.dwCurrentState = SCARD_STATE_UNAWARE
 
     rv = _rv(lib.SCardGetStatusChange(ctx, 0, ctypes.byref(state), 1))
+    if rv in SERVICE_LEVEL_ERRORS:
+        raise PCSCError(f"SCardGetStatusChange failed (0x{rv:08X})")
     if rv != SCARD_S_SUCCESS:
         return False
     return bool(state.dwEventState & SCARD_STATE_PRESENT)
@@ -136,7 +161,8 @@ def list_readers(lib=None):
 
     ctx = context.value
     try:
-        return [(name, _card_present(lib, ctx, name))
-                for name in _reader_names(lib, ctx)]
+        # Decoding is for display only; the raw bytes are what PC/SC answers to.
+        return [(raw.decode(errors="replace"), _card_present(lib, ctx, raw))
+                for raw in _reader_names(lib, ctx)]
     finally:
         lib.SCardReleaseContext(ctx)

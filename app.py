@@ -129,15 +129,68 @@ def clear_slot_cache():
         _slot_cache.clear()
 
 
-def detect_reader():
+# PC/SC normally answers in milliseconds. It can also block: this project has
+# watched a call sit in SCardGetStatusChange for 2048 seconds, released only by
+# physically re-plugging the reader. SCardEstablishContext and SCardListReaders
+# take no timeout argument, so the deadline has to be imposed from outside.
+DETECT_TIMEOUT = 10.0
+
+_detect_lock = threading.Lock()
+_detect_inflight = None      # a scan that blew its deadline and may never return
+
+
+class DetectTimeout(Exception):
+    """Reader detection did not finish within its deadline."""
+
+
+def reset_detection_state():
+    """Forget a wedged scan. For tests, and for a caller that knows better."""
+    global _detect_inflight
+    with _detect_lock:
+        _detect_inflight = None
+
+
+def detect_reader(timeout=None):
     """Return (reader_name, card_present) via PC/SC.
 
     Instant, and works alongside CryptoTokenKit - unlike PKCS#11 enumeration,
     which is slow. Used as a cheap gate before the expensive part.
 
-    Raises pcsc.PCSCError if the PC/SC service itself cannot be reached.
+    Raises pcsc.PCSCError if the PC/SC service cannot be reached, and
+    DetectTimeout if it accepts the call but never answers. A blocked C call
+    cannot be cancelled from Python, so the thread running it is abandoned -
+    and remembered, because the frontend re-polls every 15s and would
+    otherwise pile up one abandoned thread per poll against a wedged service.
     """
-    for name, card_present in pcsc.list_readers():
+    global _detect_inflight
+    timeout = DETECT_TIMEOUT if timeout is None else timeout
+
+    with _detect_lock:
+        if _detect_inflight is not None and _detect_inflight.is_alive():
+            raise DetectTimeout('a previous reader scan is still blocked')
+        _detect_inflight = None
+
+    outcome = {}
+
+    def scan():
+        try:
+            outcome['readers'] = pcsc.list_readers()
+        except BaseException as exc:          # carried across to the caller
+            outcome['error'] = exc
+
+    worker = threading.Thread(target=scan, daemon=True, name='pcsc-detect')
+    worker.start()
+    worker.join(timeout)
+
+    if worker.is_alive():
+        with _detect_lock:
+            _detect_inflight = worker
+        raise DetectTimeout(f'no answer from PC/SC within {timeout:g}s')
+
+    if 'error' in outcome:
+        raise outcome['error']
+
+    for name, card_present in outcome.get('readers', []):
         if card_present:
             return name, True
     return None, False
@@ -523,8 +576,20 @@ def api_slots():
     is cached per library path, because enumeration costs ~8-20s on a cold
     driver and the frontend polls this every 15s.
     """
+    # Checked before touching the hardware: a build without the binding is
+    # broken for everyone, and saying "no card" would blame the user's reader
+    # for a packaging defect.
+    if not PKCS11_AVAILABLE:
+        return jsonify({'slots': [], 'code': 'pkcs11_missing',
+                        'error': 'PKCS#11 support is missing from this build. '
+                                 'Please reinstall the app.'})
+
     try:
         reader_name, card_present = detect_reader()
+    except DetectTimeout as e:
+        return jsonify({'slots': [], 'code': 'detect_timeout',
+                        'error': f'The smart card service stopped responding ({e}). '
+                                 'Unplug the reader and plug it back in.'})
     except pcsc.PCSCError as e:
         return jsonify({'slots': [], 'code': 'pcsc_unavailable',
                         'error': f'macOS smart card service unavailable: {e}'})
@@ -537,10 +602,6 @@ def api_slots():
         clear_slot_cache()
         return jsonify({'slots': [], 'code': 'no_card',
                         'error': 'No smart card detected. Please insert your CEI card.'})
-
-    if not PKCS11_AVAILABLE:
-        return jsonify({'slots': [], 'code': 'pkcs11_missing',
-                        'error': 'python-pkcs11 not installed'})
 
     lib_path = get_pkcs11_lib_path(request.args.get('pkcs11_path'))
 
