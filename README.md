@@ -47,24 +47,15 @@ so there is no Homebrew formula or extra installer to add.
 
 1. Download the latest release from [Releases](../../releases)
 2. Extract and move `CEI PDF Signer.app` to `/Applications`
-3. On first run, macOS refuses to open the app, reporting that it cannot verify it is
-   free of malware. The app is signed ad-hoc rather than with a paid Apple Developer ID,
-   which is what that message means. To open it: double-click the app, press **Done**
-   (not "Move to Trash"), then go to **System Settings → Privacy & Security**, scroll to
-   *Security*, and click **Open Anyway** next to the app's name. Confirm, entering an
-   administrator password if prompted. Subsequent launches are normal.
+3. Open it
 
-   Right-clicking the app and choosing "Open" was the shortcut on older macOS versions.
-   Apple removed it, so it no longer works.
-
-   A [walkthrough with screenshots](https://sudondream.github.io/cei-pdf-signer/#first-launch)
-   is on the project page.
+The app is signed with an Apple Developer ID and notarized by Apple, so macOS opens it
+without any warning and there is no security setting to change.
 
 #### Verifying the download (optional)
 
-macOS says it cannot verify the app because it is not signed with a paid Apple developer
-certificate. If you would rather confirm the download yourself, every release publishes
-`SHA256SUMS.txt` beside the archive. Download both into the same folder and run:
+Every release publishes `SHA256SUMS.txt` beside the archive. Download both into the same
+folder and run:
 
 ```bash
 cd ~/Downloads && shasum -a 256 -c SHA256SUMS.txt

@@ -1,11 +1,59 @@
 <!DOCTYPE html>
-<html lang="en">
+<!-- Romanian by default: this signs Romanian ID cards, so that is who arrives here. -->
+<html lang="ro">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>CEI PDF Signer - Sign PDFs with Romanian Electronic ID</title>
-    <meta name="description" content="Free, open-source application for digitally signing PDF documents using the Romanian Electronic Identity Card (CEI).">
+
+    <title>Semnare PDF cu buletinul electronic (CEI) pe Mac - CEI PDF Signer</title>
+    <meta name="description" content="Aplicatie gratuita si open-source pentru macOS care semneaza documente PDF cu noua carte de identitate electronica (CEI). Semnatura se face local, pe card - documentul nu se incarca nicaieri.">
+    <link rel="canonical" href="https://sudondream.github.io/cei-pdf-signer/">
+
+    <!-- Cele doua variante lingvistice sunt aceeasi pagina, comutata din JS;
+         alternate/x-default spune motoarelor de cautare exact asta. -->
+    <link rel="alternate" hreflang="ro" href="https://sudondream.github.io/cei-pdf-signer/">
+    <link rel="alternate" hreflang="en" href="https://sudondream.github.io/cei-pdf-signer/">
+    <link rel="alternate" hreflang="x-default" href="https://sudondream.github.io/cei-pdf-signer/">
+
+    <!-- Previzualizarea la partajare pe WhatsApp / Facebook, asa cum circula
+         de fapt astfel de aplicatii intre oameni. -->
+    <meta property="og:type" content="website">
+    <meta property="og:locale" content="ro_RO">
+    <meta property="og:locale:alternate" content="en_US">
+    <meta property="og:site_name" content="CEI PDF Signer">
+    <meta property="og:url" content="https://sudondream.github.io/cei-pdf-signer/">
+    <meta property="og:title" content="Semneaza PDF-uri cu buletinul electronic, pe Mac">
+    <meta property="og:description" content="Aplicatie gratuita si open-source pentru macOS. Semnatura se face local, pe cardul tau - documentul nu se incarca nicaieri.">
+    <meta property="og:image" content="https://sudondream.github.io/cei-pdf-signer/social-card.png">
+    <meta property="og:image:width" content="1200">
+    <meta property="og:image:height" content="630">
+    <meta name="twitter:card" content="summary_large_image">
+    <meta name="twitter:title" content="Semneaza PDF-uri cu buletinul electronic, pe Mac">
+    <meta name="twitter:description" content="Aplicatie gratuita si open-source pentru macOS. Semnatura se face local, pe cardul tau.">
+    <meta name="twitter:image" content="https://sudondream.github.io/cei-pdf-signer/social-card.png">
+
     <link rel="icon" type="image/png" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🪪</text></svg>">
+
+    <!-- Date structurate: ajuta Google sa afiseze aplicatia ca software gratuit
+         pentru macOS, cu pretul si platforma explicite. -->
+    <script type="application/ld+json">
+    {
+      "@context": "https://schema.org",
+      "@type": "SoftwareApplication",
+      "name": "CEI PDF Signer",
+      "applicationCategory": "UtilitiesApplication",
+      "operatingSystem": "macOS 10.13 sau mai nou",
+      "inLanguage": ["ro", "en"],
+      "description": "Aplicatie gratuita si open-source pentru macOS care semneaza digital documente PDF folosind cartea de identitate electronica (CEI) din Romania.",
+      "url": "https://sudondream.github.io/cei-pdf-signer/",
+      "downloadUrl": "https://github.com/sudondream/cei-pdf-signer/releases/latest",
+      "softwareVersion": "0.13-beta",
+      "license": "https://github.com/sudondream/cei-pdf-signer/blob/main/LICENSE",
+      "isAccessibleForFree": true,
+      "offers": { "@type": "Offer", "price": "0", "priceCurrency": "RON" },
+      "author": { "@type": "Person", "name": "Bancu Adrian" }
+    }
+    </script>
     <style>
         :root {
             --bg-primary: #0a0a1a;
@@ -556,8 +604,8 @@
             <a href="#features" data-lang="ro">Functii</a>
             <a href="#install" data-lang="en">Install</a>
             <a href="#install" data-lang="ro">Instalare</a>
-            <a href="#first-launch" data-lang="en">First launch</a>
-            <a href="#first-launch" data-lang="ro">Prima deschidere</a>
+            <a href="#trust" data-lang="en">Security</a>
+            <a href="#trust" data-lang="ro">Securitate</a>
             <a href="https://github.com/sudondream/cei-pdf-signer" target="_blank">GitHub</a>
             <div class="lang-toggle">
                 <button class="lang-btn active" onclick="setLang('en')">EN</button>
@@ -587,10 +635,6 @@
                 <span data-lang="ro">Vezi Codul</span>
             </a>
         </div>
-        <p class="hero-note">
-            <span data-lang="en">The first time you open it, macOS will say it cannot verify the app is free of malware. That is expected — the app is not signed with a paid Apple certificate. <a href="#first-launch">Here is how to open it</a>, and how to check the download yourself.</span>
-            <span data-lang="ro">La prima deschidere, macOS va spune ca nu poate verifica daca aplicatia este lipsita de programe daunatoare. Este de asteptat — aplicatia nu este semnata cu un certificat Apple platit. <a href="#first-launch">Iata cum o deschizi</a> si cum poti verifica singur ce ai descarcat.</span>
-        </p>
     </section>
 
     <section class="demo">
@@ -756,64 +800,24 @@
             <div class="step">
                 <div class="step-number">4</div>
                 <div class="step-content">
-                    <h4 data-lang="en">First Launch</h4>
-                    <h4 data-lang="ro">Prima Lansare</h4>
-                    <p data-lang="en">macOS will refuse to open it the first time, saying it cannot verify the app is free of malware. This is expected, and it takes three clicks to get past — <a href="#first-launch" style="color: var(--accent)">see the walkthrough with screenshots</a>.</p>
-                    <p data-lang="ro">La prima deschidere macOS va refuza aplicatia, spunand ca nu poate verifica daca este lipsita de programe daunatoare. Este de asteptat si se trece in trei clicuri — <a href="#first-launch" style="color: var(--accent)">vezi pasii cu capturi de ecran</a>.</p>
+                    <h4 data-lang="en">Open it</h4>
+                    <h4 data-lang="ro">Deschide-o</h4>
+                    <p data-lang="en">Insert your card, double-click the app, and sign. It is notarized by Apple, so there is no warning and no security setting to change.</p>
+                    <p data-lang="ro">Introdu cardul, dublu-click pe aplicatie si semneaza. Este notarizata de Apple, deci nu apare niciun avertisment si nu ai nicio setare de securitate de schimbat.</p>
                 </div>
             </div>
         </div>
     </section>
 
-    <section class="first-launch" id="first-launch">
-        <h2 class="section-title" data-lang="en">Opening it the first time</h2>
-        <h2 class="section-title" data-lang="ro">Prima deschidere</h2>
+    <section class="first-launch" id="trust">
+        <h2 class="section-title" data-lang="en">Signed and verifiable</h2>
+        <h2 class="section-title" data-lang="ro">Semnata si verificabila</h2>
 
         <div class="fl-why">
-            <p data-lang="en">macOS refuses to open this app the first time and says it cannot verify it is free of malware. Nothing is wrong with your download. Apple charges for the developer certificate that would remove this message, and this app does not have one — so macOS reports that it does not recognise the publisher. It says the same thing about every unsigned app.</p>
-            <p data-lang="ro">macOS refuza aplicatia la prima deschidere si spune ca nu poate verifica daca este lipsita de programe daunatoare. Nu este nimic in neregula cu ce ai descarcat. Certificatul de dezvoltator care ar sterge acest mesaj se plateste, iar aplicatia nu il are — asa ca macOS raporteaza ca nu recunoaste editorul. Spune acelasi lucru despre orice aplicatie nesemnata.</p>
-            <p data-lang="en">The whole source code is public, and every release is built from it. If you want to confirm that the file you downloaded is exactly the one that was published, there is a way to check it yourself at the bottom of this page.</p>
-            <p data-lang="ro">Codul sursa este public in intregime, iar fiecare versiune este construita din el. Daca vrei sa confirmi ca fisierul descarcat este exact cel publicat, gasesti mai jos cum sa verifici singur.</p>
-        </div>
-
-        <div class="fl-steps">
-            <div class="fl-step">
-                <div class="step-number">1</div>
-                <div>
-                    <p data-lang="en">Double-click <strong>CEI PDF Signer</strong> in Applications. macOS shows the warning below. Press <strong>Done</strong> — never "Move to Trash".</p>
-                    <p data-lang="ro">Dublu-click pe <strong>CEI PDF Signer</strong> in Applications. macOS afiseaza avertismentul de mai jos. Apasa <strong>Done</strong> — niciodata "Move to Trash".</p>
-                </div>
-                <img class="fl-shot" src="first-launch-1-blocked.png" alt="macOS warning that the app cannot be verified" loading="lazy" onerror="this.remove()">
-            </div>
-
-            <div class="fl-step">
-                <div class="step-number">2</div>
-                <div>
-                    <p data-lang="en">Open <strong>System Settings &rarr; Privacy &amp; Security</strong> and scroll down to the <em>Security</em> section. The app is listed there as blocked. Click <strong>Open Anyway</strong>.</p>
-                    <p data-lang="ro">Deschide <strong>System Settings &rarr; Privacy &amp; Security</strong> si deruleaza pana la sectiunea <em>Security</em>. Aplicatia apare acolo ca blocata. Apasa <strong>Open Anyway</strong>.</p>
-                    <p style="margin-top:0.75rem;">
-                        <a class="btn btn-secondary" href="x-apple.systempreferences:com.apple.settings.PrivacySecurity.extension">
-                            <span>⚙️</span>
-                            <span data-lang="en">Open Privacy &amp; Security for me</span>
-                            <span data-lang="ro">Deschide-mi Privacy &amp; Security</span>
-                        </a>
-                    </p>
-                    <p class="fl-hint">
-                        <span data-lang="en">Your browser will ask whether to allow this page to open System Settings — say yes. If nothing happens, open it by hand as described above.</span>
-                        <span data-lang="ro">Browserul te va intreba daca permiti paginii sa deschida System Settings — accepta. Daca nu se intampla nimic, deschide-l manual, cum este descris mai sus.</span>
-                    </p>
-                </div>
-                <img class="fl-shot" src="first-launch-2-open-anyway.png" alt="The Open Anyway button in Privacy and Security settings" loading="lazy" onerror="this.remove()">
-            </div>
-
-            <div class="fl-step">
-                <div class="step-number">3</div>
-                <div>
-                    <p data-lang="en">Confirm once more, entering an administrator password if asked. The app opens, and every launch after this one is normal — you only do this once.</p>
-                    <p data-lang="ro">Confirma inca o data si introdu o parola de administrator daca ti se cere. Aplicatia porneste, iar urmatoarele lansari sunt normale — pasul acesta se face o singura data.</p>
-                </div>
-                <img class="fl-shot" src="first-launch-3-confirm.png" alt="Final confirmation dialog before the app opens" loading="lazy" onerror="this.remove()">
-            </div>
+            <p data-lang="en">This application is signed with an Apple developer certificate and notarized by Apple, so macOS opens it without any warning. You do not need to change any security setting.</p>
+            <p data-lang="ro">Aplicatia este semnata cu un certificat de dezvoltator Apple si notarizata de Apple, asa ca macOS o deschide fara niciun avertisment. Nu trebuie sa modifici nicio setare de securitate.</p>
+            <p data-lang="en">The entire source code is public, and every release is built from it. Your PIN and your certificate never leave your computer: the document is signed locally, by the card itself.</p>
+            <p data-lang="ro">Codul sursa este public in intregime, iar fiecare versiune este construita din el. PIN-ul si certificatul tau nu parasesc niciodata calculatorul: documentul este semnat local, chiar de card.</p>
         </div>
 
         <div class="fl-verify">
@@ -849,8 +853,11 @@
         }
 
         // Load saved language preference
+        // Romanian by default: the app signs Romanian ID cards, so almost
+        // everyone arriving here reads Romanian. English stays one click away
+        // and is remembered once chosen.
         const savedLang = localStorage.getItem('lang') ||
-            (navigator.language.startsWith('ro') ? 'ro' : 'en');
+            (navigator.language.startsWith('en') ? 'en' : 'ro');
         setLang(savedLang);
     </script>
 </body>

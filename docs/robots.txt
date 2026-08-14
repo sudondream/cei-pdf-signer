@@ -1,0 +1,4 @@
+User-agent: *
+Allow: /
+
+Sitemap: https://sudondream.github.io/cei-pdf-signer/sitemap.xml
