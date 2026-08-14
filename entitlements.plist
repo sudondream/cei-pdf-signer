@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <!--
+      Notarization requires the Hardened Runtime, and the Hardened Runtime
+      turns on library validation: a process may then only load libraries
+      signed by the same team as itself, or by Apple.
+
+      This app exists to drive the Romanian eID card, which means loading
+      /Library/Application Support/com.idemia.idplug/lib/libidplug-pkcs11.*.dylib
+      - signed by "IDEMIA IDENTITY & SECURITY FRANCE (X28J878QBZ)", a
+      different team. Without this entitlement the app would pass Gatekeeper
+      and then be unable to read a card at all: a worse failure than the one
+      notarization fixes, and a silent one.
+    -->
+    <key>com.apple.security.cs.disable-library-validation</key>
+    <true/>
+</dict>
+</plist>
