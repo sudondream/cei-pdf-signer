@@ -107,6 +107,26 @@ else
 fi
 
 echo ""
+echo "--- 2b. Radacina bundle-ului ---"
+
+# Un bundle .app corect are EXACT un singur element in radacina: Contents.
+# Orice altceva este "unsealed content": rupe sigiliul semnaturii
+# (`codesign --verify` raporteaza "unsealed contents present in the bundle
+# root") si calatoreste in arhiva pana la utilizator.
+#
+# S-a intamplat: `ln -sf ... "/Applications/CEI PDF Signer.app"` din build.sh
+# urmarea symlink-ul deja existent si scria link-ul INAUNTRUL lui
+# dist/CEI PDF Signer.app/. Un symlink de 75 de octeti catre calea de pe
+# masina de build a fost livrat astfel in v0.10-beta si v0.11-beta.
+ROOT_EXTRA="$(ls -A "$APP" | grep -v '^Contents$' || true)"
+if [ -z "$ROOT_EXTRA" ]; then
+    pass "radacina bundle-ului contine doar Contents"
+else
+    fail "elemente straine in radacina bundle-ului (rup sigiliul semnaturii):"
+    echo "$ROOT_EXTRA" | sed 's/^/      /'
+fi
+
+echo ""
 echo "--- 3. Modulele native Python (_struct & co.) ---"
 
 # lib-dynload e accesibil doar prin symlink-ul python3.X -> python3__dot__X

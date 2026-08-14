@@ -40,8 +40,25 @@ rm -rf build dist
 echo "Compilez aplicatia..."
 pyinstaller CEIPDFSigner.spec
 
-# Create symlink in /Applications pointing to the built app
-ln -sf "$(pwd)/dist/CEI PDF Signer.app" "/Applications/CEI PDF Signer.app"
+# Symlink de convenienta in /Applications catre build-ul curent.
+#
+# ATENTIE la doua capcane, ambele s-au manifestat deja:
+#
+# 1. `ln -sf` URMARESTE un symlink existent si scrie inauntrul directorului
+#    catre care arata. Cum tinta era chiar dist/CEI PDF Signer.app, link-ul
+#    ajungea in RADACINA bundle-ului, rupea sigiliul semnaturii si pleca in
+#    arhiva: v0.10-beta si v0.11-beta au fost publicate cu el. `-h` opreste
+#    urmarirea.
+# 2. Daca acolo exista o instalare reala (bundle propriu-zis, nu symlink),
+#    nu o atingem: nu stergem si nu scriem in aplicatia instalata de cineva.
+APP_LINK="/Applications/CEI PDF Signer.app"
+if [ -e "$APP_LINK" ] && [ ! -L "$APP_LINK" ]; then
+    echo "Sar peste symlink: $APP_LINK este o instalare reala, nu o ating."
+elif ln -sfh "$(pwd)/dist/CEI PDF Signer.app" "$APP_LINK" 2>/dev/null; then
+    echo "Symlink creat: $APP_LINK -> dist/"
+else
+    echo "Nu am putut crea symlinkul in /Applications (permisiuni) - ignor."
+fi
 
 echo ""
 echo "=== Build Complet ==="
