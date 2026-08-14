@@ -171,13 +171,26 @@
 - Requires `freeze_support()` at the start of `main.py`.
 - Must use `set_start_method('fork')` — the default `spawn` method on macOS would also try to re-launch the binary.
 
-### PATH in Bundled App
-- The bundled app may not have `/usr/local/bin` in PATH.
-- Must explicitly add it for `opensc-tool` and other system tools to be found:
-  ```python
-  if '/usr/local/bin' not in os.environ.get('PATH', ''):
-      os.environ['PATH'] = '/usr/local/bin:' + os.environ.get('PATH', '')
-  ```
+### PATH in Bundled App — and why detection no longer depends on it
+- A bundle launched from Finder gets a minimal PATH: no `/usr/local/bin`, no
+  `/opt/homebrew/bin`.
+- Reader detection used to shell out to `opensc-tool`, which is absent from a stock
+  macOS. Users hit `FileNotFoundError`, the frontend matched the substring `not found`
+  in the message, and the badge announced **"PKCS#11 not found"** — pointing at a
+  library path that branch never even read. Reported from the field; unfixable by the
+  user, because the setting they were sent to change had no bearing on it.
+- Patching PATH only moved the problem: prepending `/usr/local/bin` covered the
+  official OpenSC `.pkg` (which installs there) but not Homebrew on Apple Silicon.
+- Fix: talk to `PCSC.framework` directly via `ctypes` (`pcsc.py`). It ships with macOS,
+  so detection depends on nothing installed and no PATH at all.
+- Two details from `pcsclite.h` that ctypes will not tell you: `SCARDCONTEXT` is
+  `int32_t` on Apple (not a pointer), and `SCARD_READERSTATE` is under `#pragma pack(1)`
+  — so the ctypes struct needs `_pack_ = 1`.
+
+### Never key UI state off error prose
+- The badge above lit on `error.includes('not found')`, so an unrelated failure was
+  reported as a PKCS#11 problem. `/api/slots` now returns a `code`
+  (`no_card`, `pcsc_unavailable`, `pkcs11_error`, …) and the frontend switches on that.
 
 ---
 
@@ -194,7 +207,8 @@
 ### What Works
 | Tool/Library | Level | Works with CTK | Notes |
 |---|---|---|---|
-| `opensc-tool --list-readers` | PC/SC | Yes | Instant, reliable detection |
+| `PCSC.framework` via `ctypes` | PC/SC | Yes | **What the app uses.** Instant, ships with macOS, nothing to install |
+| `opensc-tool --list-readers` | PC/SC | Yes | Instant and reliable — but not installed on a stock Mac. Was the cause of the bogus "PKCS#11 not found" |
 | `pyscard` (Python) | PC/SC | Yes | Can connect, send APDUs, read ATR |
 | `system_profiler SPSmartCardsDataType` | System | Yes | Shows reader + ATR |
 

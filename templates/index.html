@@ -948,8 +948,8 @@
     <div class="header">
         <h1>CEI PDF Signer</h1>
         <div class="header-status">
-            <span id="pkcs11-warning" class="pkcs11-warning" onclick="openSettings()" title="PKCS#11 library not found - Click to configure">
-                <span>&#9888;</span><span>PKCS#11 not found</span>
+            <span id="pkcs11-warning" class="pkcs11-warning" onclick="openSettings()" title="Click to configure the PKCS#11 library path">
+                <span>&#9888;</span><span id="pkcs11-warning-text">PKCS#11 not found</span>
             </span>
             <button class="settings-btn" onclick="openSettings()" title="Settings">&#9881;</button>
             <span id="card-status" class="status-badge searching" onclick="detectCard()">
@@ -1237,19 +1237,26 @@
             document.getElementById('pkcs11-path').value = DEFAULT_PKCS11_PATH;
         }
 
+        // Only these mean the PKCS#11 library is the problem, so only these
+        // may point the user at the library-path setting. Matching on error
+        // prose instead once lit this badge for a missing command-line tool
+        // and sent people to reconfigure a path that was never consulted.
+        const PKCS11_WARNING_TEXT = {
+            pkcs11_error: 'PKCS#11 library unreadable',
+            pkcs11_missing: 'PKCS#11 support missing',
+        };
+
         async function checkPkcs11Status() {
             const warningEl = document.getElementById('pkcs11-warning');
+            const warningTextEl = document.getElementById('pkcs11-warning-text');
             try {
                 const pkcs11Path = getPkcs11Path();
-                const response = await fetch('/api/status');
-                const data = await response.json();
-
-                // Check if the configured path exists
-                // We need to check the actual configured path, not just the default
                 const slotsResponse = await fetch('/api/slots?pkcs11_path=' + encodeURIComponent(pkcs11Path));
                 const slotsData = await slotsResponse.json();
 
-                if (slotsData.error && slotsData.error.includes('not found')) {
+                const text = PKCS11_WARNING_TEXT[slotsData.code];
+                if (text) {
+                    warningTextEl.textContent = text;
                     warningEl.classList.add('visible');
                 } else {
                     warningEl.classList.remove('visible');

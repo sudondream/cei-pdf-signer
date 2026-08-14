@@ -19,6 +19,9 @@ from flask import Flask, render_template, request, jsonify, send_file
 from flask_cors import CORS
 from werkzeug.utils import secure_filename
 
+# Reader detection through PCSC.framework, which ships with macOS.
+import pcsc
+
 # PKCS#11 imports - python-pkcs11 talks to the card. PyKCS11 used to sit here
 # too; it is gone. Nothing called it after the switch, and its wildcard import
 # dumped ~200 CK* constants into this module's namespace.
@@ -69,10 +72,6 @@ app = Flask(__name__, template_folder=template_folder)
 CORS(app)
 app.config['MAX_CONTENT_LENGTH'] = 50 * 1024 * 1024  # 50MB max
 app.config['UPLOAD_FOLDER'] = tempfile.mkdtemp()
-
-# Ensure /usr/local/bin is in PATH (needed for opensc-tool in bundled app)
-if '/usr/local/bin' not in os.environ.get('PATH', ''):
-    os.environ['PATH'] = '/usr/local/bin:' + os.environ.get('PATH', '')
 
 # Default PKCS#11 library for Romanian CEI
 DEFAULT_PKCS11_LIB = "/Library/Application Support/com.idemia.idplug/lib/libidplug-pkcs11.2.7.0.dylib"
@@ -135,29 +134,12 @@ def detect_reader():
 
     Instant, and works alongside CryptoTokenKit - unlike PKCS#11 enumeration,
     which is slow. Used as a cheap gate before the expensive part.
+
+    Raises pcsc.PCSCError if the PC/SC service itself cannot be reached.
     """
-    result = subprocess.run(['opensc-tool', '--list-readers'],
-                            capture_output=True, text=True, timeout=10)
-    output = result.stdout.strip()
-    if not output or 'No smart card readers' in output:
-        return None, False
-
-    for line in output.split('\n'):
-        line = line.strip()
-        if not line or line.startswith('#') or line.startswith('Nr.'):
-            continue
-        parts = line.split(None, 3)  # nr, card_present, features, name
-        if len(parts) < 2:
-            continue
-        try:
-            slot_nr = int(parts[0])
-        except ValueError:
-            continue
-        if parts[1].lower() == 'yes':
-            name = parts[3] if len(parts) >= 4 else (
-                parts[2] if len(parts) >= 3 else f'Reader {slot_nr}')
+    for name, card_present in pcsc.list_readers():
+        if card_present:
             return name, True
-
     return None, False
 
 
@@ -543,20 +525,22 @@ def api_slots():
     """
     try:
         reader_name, card_present = detect_reader()
-    except FileNotFoundError:
-        return jsonify({'slots': [], 'error': 'opensc-tool not found. Please install OpenSC.'})
-    except subprocess.TimeoutExpired:
-        return jsonify({'slots': [], 'error': 'Reader detection timed out.'})
+    except pcsc.PCSCError as e:
+        return jsonify({'slots': [], 'code': 'pcsc_unavailable',
+                        'error': f'macOS smart card service unavailable: {e}'})
     except Exception as e:
-        return jsonify({'slots': [], 'error': f'Error: {str(e)}'})
+        return jsonify({'slots': [], 'code': 'detect_failed',
+                        'error': f'Reader detection failed: {e}'})
 
     if not card_present:
         # Card pulled - drop the cache so the next insert re-enumerates.
         clear_slot_cache()
-        return jsonify({'slots': [], 'error': 'No smart card detected. Please insert your CEI card.'})
+        return jsonify({'slots': [], 'code': 'no_card',
+                        'error': 'No smart card detected. Please insert your CEI card.'})
 
     if not PKCS11_AVAILABLE:
-        return jsonify({'slots': [], 'error': 'python-pkcs11 not installed'})
+        return jsonify({'slots': [], 'code': 'pkcs11_missing',
+                        'error': 'python-pkcs11 not installed'})
 
     lib_path = get_pkcs11_lib_path(request.args.get('pkcs11_path'))
 
@@ -570,11 +554,15 @@ def api_slots():
         try:
             slot_info = enumerate_slots(pkcs11.lib(lib_path))
         except Exception as e:
-            return jsonify({'slots': [], 'error': f'Could not read card slots: {e}'})
+            # The one case that genuinely points at the PKCS#11 library: it
+            # would not load, or the driver behind it refused to talk.
+            return jsonify({'slots': [], 'code': 'pkcs11_error',
+                            'error': f'Could not read card slots: {e}'})
 
         if not slot_info:
-            return jsonify({'slots': [], 'error':
-                            'Card detected but no PKCS#11 slots available. Re-seat the card and retry.'})
+            return jsonify({'slots': [], 'code': 'no_slots',
+                            'error': 'Card detected but no PKCS#11 slots available. '
+                                     'Re-seat the card and retry.'})
 
         for slot in slot_info:
             slot['model'] = reader_name or ''

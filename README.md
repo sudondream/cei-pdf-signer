@@ -38,6 +38,9 @@ CEI PDF Signer allows you to digitally sign PDF documents using the qualified ce
 - macOS 10.13 or newer
 - [IDPlugManager](https://hub.mai.gov.ro/aplicatie-cei) - official CEI software (provides the PKCS#11 library)
 
+Nothing else. Reader detection goes through PCSC.framework, which is part of macOS,
+so there is no Homebrew formula or extra installer to add.
+
 ### Installation
 
 #### Option 1: Pre-built Application (Recommended)
@@ -75,9 +78,13 @@ cd cei-web-signer
 - Verify the CEI is properly inserted
 - Reinstall IDPlugManager
 
-#### "PKCS11 library not found"
+#### "PKCS#11 library unreadable"
 - Verify IDPlugManager is installed
 - Open Settings and check/update the PKCS#11 library path
+
+This warning appears only when the PKCS#11 library itself fails to load. Reader and
+card problems report themselves separately, so if you see anything else, the library
+path is not what needs changing.
 
 #### macOS blocks the reader / App hangs
 

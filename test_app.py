@@ -11,6 +11,7 @@ These cover the two defects that produced "0 of 3 signed, empty zip":
 
 No smart card required.
 """
+import ctypes
 import os
 import re
 import tempfile
@@ -19,6 +20,7 @@ import zipfile
 from unittest import mock
 
 import app as app_module
+import pcsc
 
 
 class FakeSlot:
@@ -897,6 +899,186 @@ class RomanianDiacriticsTests(unittest.TestCase):
         payload = app_module.app.test_client().get('/api/status').get_json()
         self.assertTrue(payload['signature_font_embedded'],
                         f"font not active: {payload.get('signature_font_path')}")
+
+
+class FakePCSC:
+    """Stands in for PCSC.framework.
+
+    Only the four entry points list_readers() calls. Scripted return codes let
+    a test drive the failure branches without unplugging real hardware.
+    """
+
+    def __init__(self, readers=(), establish_rv=pcsc.SCARD_S_SUCCESS,
+                 list_rv=pcsc.SCARD_S_SUCCESS, status_rv=pcsc.SCARD_S_SUCCESS):
+        self.readers = list(readers)          # [(name, card_present)]
+        self.establish_rv = establish_rv
+        self.list_rv = list_rv
+        self.status_rv = status_rv
+        self.released = []
+
+    def _blob(self):
+        # PC/SC hands back NUL-separated names terminated by a second NUL.
+        return b''.join(n.encode() + b'\x00' for n, _ in self.readers) + b'\x00'
+
+    def SCardEstablishContext(self, scope, res1, res2, ctx_ref):
+        if self.establish_rv == pcsc.SCARD_S_SUCCESS:
+            ctx_ref._obj.value = 7
+        return self.establish_rv
+
+    def SCardListReaders(self, ctx, groups, buf, size_ref):
+        if self.list_rv != pcsc.SCARD_S_SUCCESS:
+            return self.list_rv
+        blob = self._blob()
+        size_ref._obj.value = len(blob)
+        if buf is not None:
+            ctypes.memmove(buf, blob, len(blob))
+        return pcsc.SCARD_S_SUCCESS
+
+    def SCardGetStatusChange(self, ctx, timeout, states_ref, count):
+        state = states_ref._obj
+        present = dict(self.readers)[state.szReader.decode()]
+        state.dwEventState = (pcsc.SCARD_STATE_PRESENT if present
+                              else pcsc.SCARD_STATE_EMPTY)
+        return self.status_rv
+
+    def SCardReleaseContext(self, ctx):
+        self.released.append(ctx)
+        return pcsc.SCARD_S_SUCCESS
+
+
+class ListReadersTests(unittest.TestCase):
+    """Reader detection talks to PCSC.framework directly.
+
+    It used to shell out to `opensc-tool`, which is not installed on a stock
+    Mac - the resulting error was rendered as "PKCS#11 not found", sending
+    users to reconfigure a library path that was never the problem.
+    """
+
+    def test_reports_each_reader_and_whether_a_card_is_in_it(self):
+        lib = FakePCSC(readers=[('Idemia Reader', True), ('Spare Reader', False)])
+        self.assertEqual(pcsc.list_readers(lib),
+                         [('Idemia Reader', True), ('Spare Reader', False)])
+
+    def test_no_reader_attached_is_a_normal_empty_result(self):
+        """SCARD_E_NO_READERS_AVAILABLE means "none plugged in", not a fault."""
+        lib = FakePCSC(list_rv=pcsc.SCARD_E_NO_READERS_AVAILABLE)
+        self.assertEqual(pcsc.list_readers(lib), [])
+
+    def test_empty_reader_list_yields_nothing(self):
+        self.assertEqual(pcsc.list_readers(FakePCSC(readers=[])), [])
+
+    def test_unreachable_pcsc_service_raises(self):
+        lib = FakePCSC(establish_rv=pcsc.SCARD_E_NO_SERVICE)
+        with self.assertRaises(pcsc.PCSCError):
+            pcsc.list_readers(lib)
+
+    def test_context_is_released_when_listing_fails(self):
+        """A leaked context holds a connection to the PC/SC daemon open."""
+        lib = FakePCSC(list_rv=0x80100001)  # SCARD_F_INTERNAL_ERROR
+        with self.assertRaises(pcsc.PCSCError):
+            pcsc.list_readers(lib)
+        self.assertEqual(lib.released, [7], "context must be released on the error path")
+
+    def test_reader_whose_status_cannot_be_read_is_reported_cardless(self):
+        """One sulking reader must not blind the app to the others."""
+        lib = FakePCSC(readers=[('Idemia Reader', True)], status_rv=0x80100001)
+        self.assertEqual(pcsc.list_readers(lib), [('Idemia Reader', False)])
+
+    def test_context_is_released_on_success(self):
+        lib = FakePCSC(readers=[('Idemia Reader', True)])
+        pcsc.list_readers(lib)
+        self.assertEqual(lib.released, [7])
+
+
+class DetectReaderTests(unittest.TestCase):
+    """app.detect_reader keeps its (name, card_present) contract."""
+
+    def test_returns_the_reader_holding_a_card(self):
+        readers = [('Empty Reader', False), ('Idemia Reader', True)]
+        with mock.patch.object(app_module.pcsc, 'list_readers', return_value=readers):
+            self.assertEqual(app_module.detect_reader(), ('Idemia Reader', True))
+
+    def test_reader_without_a_card_reports_absence(self):
+        with mock.patch.object(app_module.pcsc, 'list_readers',
+                               return_value=[('Idemia Reader', False)]):
+            self.assertEqual(app_module.detect_reader(), (None, False))
+
+    def test_no_readers_at_all_reports_absence(self):
+        with mock.patch.object(app_module.pcsc, 'list_readers', return_value=[]):
+            self.assertEqual(app_module.detect_reader(), (None, False))
+
+
+class SlotsErrorCodeTests(unittest.TestCase):
+    """/api/slots reports a typed code; the badge must not parse prose.
+
+    The frontend used to light "PKCS#11 not found" on any error containing the
+    substring "not found", so an unrelated failure pointed users at the PKCS#11
+    settings. Every error carries a machine-readable code instead.
+    """
+
+    def setUp(self):
+        app_module.app.config['TESTING'] = True
+        self.client = app_module.app.test_client()
+        app_module.clear_slot_cache()
+        self.addCleanup(app_module.clear_slot_cache)
+
+    def test_pcsc_failure_is_not_reported_as_a_pkcs11_problem(self):
+        with mock.patch.object(app_module, 'detect_reader',
+                               side_effect=pcsc.PCSCError('service down')):
+            payload = self.client.get('/api/slots').get_json()
+        self.assertEqual(payload['code'], 'pcsc_unavailable')
+        self.assertNotIn('PKCS', payload['error'],
+                         "a PC/SC fault must not be blamed on PKCS#11")
+
+    def test_absent_card_is_coded(self):
+        with mock.patch.object(app_module, 'detect_reader', return_value=(None, False)):
+            payload = self.client.get('/api/slots').get_json()
+        self.assertEqual(payload['code'], 'no_card')
+
+    def test_unreadable_pkcs11_library_is_coded_as_such(self):
+        with mock.patch.object(app_module, 'detect_reader', return_value=('R', True)), \
+             mock.patch.object(app_module.pkcs11, 'lib', side_effect=OSError('image not found')):
+            payload = self.client.get('/api/slots').get_json()
+        self.assertEqual(payload['code'], 'pkcs11_error')
+
+    def test_success_carries_no_error_code(self):
+        with mock.patch.object(app_module, 'detect_reader', return_value=('R', True)), \
+             mock.patch.object(app_module, 'enumerate_slots',
+                               return_value=[{'id': 2, 'label': 'ADVANCED SIGNATURE PIN'}]), \
+             mock.patch.object(app_module.pkcs11, 'lib', mock.Mock()):
+            payload = self.client.get('/api/slots').get_json()
+        self.assertNotIn('code', payload)
+
+
+class NoOpenscToolTests(unittest.TestCase):
+    """Reader detection must never shell out to opensc-tool again.
+
+    It is absent from a stock macOS install, and the Homebrew path on Apple
+    Silicon (/opt/homebrew/bin) was never on the bundled app's PATH anyway.
+    PCSC.framework ships with the OS and needs nothing installed.
+    """
+
+    # Matches invoking it - a quoted string literal, as it would appear in a
+    # subprocess argument list. Prose explaining why it was dropped stays legal,
+    # the same allowance NoPyKCS11Tests makes.
+    INVOKED = re.compile(r'''["']opensc-tool["']''')
+
+    def test_no_source_invokes_opensc_tool(self):
+        here = os.path.dirname(os.path.abspath(__file__))
+        for filename in ('app.py', 'main.py', 'pcsc.py'):
+            with open(os.path.join(here, filename)) as fh:
+                src = fh.read()
+            self.assertIsNone(self.INVOKED.search(src),
+                              f"{filename} shells out to opensc-tool; "
+                              f"detection must go through PCSC.framework")
+
+    def test_badge_does_not_key_off_error_prose(self):
+        """The bug: any error containing "not found" lit the PKCS#11 warning."""
+        here = os.path.dirname(os.path.abspath(__file__))
+        with open(os.path.join(here, 'templates', 'index.html')) as fh:
+            src = fh.read()
+        self.assertNotIn("includes('not found')", src,
+                         "the badge must switch on the error code, not on prose")
 
 
 if __name__ == '__main__':
