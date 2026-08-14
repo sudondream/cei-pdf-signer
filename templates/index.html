@@ -945,6 +945,22 @@
         <div class="loading-text">Se incarca...</div>
     </div>
 
+    <!--
+      Shown while quitting waits for the card driver to finish. Leaving the
+      driver mid-call is what wedges it until the Mac is restarted, so the few
+      seconds spent here are what spare the user that. Driven from Python via
+      evaluate_js on the window's closing event.
+    -->
+    <div class="loading-screen hidden" id="closing-screen">
+        <div class="loading-logo">CEI PDF Signer</div>
+        <div class="loading-spinner"></div>
+        <div class="loading-text" id="closing-text">Se inchide...</div>
+        <div class="loading-text" style="font-size:0.85em;opacity:0.7;max-width:26rem;text-align:center;margin-top:0.75rem;">
+            Asteptam cititorul de card sa termine. Inchiderea fortata acum
+            poate bloca cititorul pana la repornirea calculatorului.
+        </div>
+    </div>
+
     <div class="header">
         <h1>CEI PDF Signer</h1>
         <div class="header-status">
@@ -1246,6 +1262,13 @@
         const PKCS11_WARNING_TEXT = {
             pkcs11_error: 'PKCS#11 library unreadable',
         };
+
+        // Called from Python while quitting waits on the card driver.
+        function showClosingNotice() {
+            const el = document.getElementById('closing-screen');
+            if (el) el.classList.remove('hidden');
+            return true;
+        }
 
         async function checkPkcs11Status() {
             const warningEl = document.getElementById('pkcs11-warning');

@@ -20,7 +20,7 @@ if getattr(sys, 'frozen', False):
         sys.path.insert(0, resources_dir)
 
 import webview
-from app import app
+from app import app, driver_busy, wait_for_driver
 
 
 # Loading screen HTML - shown immediately while Flask starts
@@ -145,6 +145,31 @@ def main():
                 <div style="text-align:center"><h2>Error</h2><p>Server failed to start. Please restart the application.</p></div>
                 </body></html>
             ''')
+
+    # Quitting while the card driver is mid-call is what leaves it wedged
+    # until the Mac is restarted - not just for this app, for every process
+    # that touches the card afterwards. So hold the close, tell the user why,
+    # and let the call finish. A wedged call never will, hence the deadline.
+    closing_started = threading.Event()
+
+    def on_closing():
+        if not driver_busy() or closing_started.is_set():
+            return True
+
+        closing_started.set()
+
+        def finish():
+            try:
+                window.evaluate_js('showClosingNotice()')
+            except Exception:
+                pass  # cosmetic only; the wait matters more than the notice
+            wait_for_driver()
+            window.destroy()
+
+        threading.Thread(target=finish, daemon=True).start()
+        return False   # cancel this close; finish() closes for real
+
+    window.events.closing += on_closing
 
     # Start the GUI - the func runs in a separate thread
     webview.start(

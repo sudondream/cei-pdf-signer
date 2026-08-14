@@ -119,10 +119,36 @@ class BoundedCaller:
         self.timeout_error = timeout_error
         self._lock = threading.Lock()
         self._inflight = None
+        self._workers = set()
 
     def reset(self):
+        """Deliberately forget a wedged call, and stop tracking its thread.
+
+        The thread may well still be spinning; this only stops us waiting on
+        it. Reserved for tests and for a caller that knows the state is stale.
+        """
         with self._lock:
             self._inflight = None
+            self._workers = set()
+
+    def is_busy(self):
+        """Whether any call we started is still running - wedged ones included.
+
+        Killing the process while one is in flight is what strands the driver,
+        so a wedged call counts: it is exactly the case worth not dying inside.
+        """
+        with self._lock:
+            self._workers = {w for w in self._workers if w.is_alive()}
+            return bool(self._workers)
+
+    def wait_until_idle(self, timeout, poll=0.1, now=time.monotonic, sleep=time.sleep):
+        """Block until no call is running. False if the deadline passes first."""
+        deadline = now() + timeout
+        while self.is_busy():
+            if now() >= deadline:
+                return False
+            sleep(poll)
+        return True
 
     def call(self, func, timeout):
         with self._lock:
@@ -139,6 +165,9 @@ class BoundedCaller:
                 outcome['error'] = exc
 
         worker = threading.Thread(target=run, daemon=True, name=f'bounded-{self.name}')
+        with self._lock:
+            self._workers = {w for w in self._workers if w.is_alive()}
+            self._workers.add(worker)
         worker.start()
         worker.join(timeout)
 
@@ -164,6 +193,26 @@ def get_slots(lib):
     """lib.get_slots(), under a deadline. Raises DriverTimeout if it wedges."""
     return _pkcs11_caller.call(lambda: lib.get_slots(token_present=True),
                                PKCS11_CALL_TIMEOUT)
+
+
+# How long to hold off quitting while the driver is mid-call. Long enough to
+# cover a cold enumeration (~12s observed), because dying inside one is what
+# strands the driver and costs the user a reboot.
+SHUTDOWN_GRACE = 20.0
+
+
+def driver_busy():
+    """Whether a PKCS#11 call is in flight right now."""
+    return _pkcs11_caller.is_busy()
+
+
+def wait_for_driver(timeout=SHUTDOWN_GRACE):
+    """Wait for in-flight PKCS#11 work to finish before the process exits.
+
+    Returns False if it did not finish in time - the call is wedged and will
+    never return, so the caller should quit anyway rather than hang.
+    """
+    return _pkcs11_caller.wait_until_idle(timeout)
 
 
 # The Idemia driver discovers the card's applications progressively: a cold

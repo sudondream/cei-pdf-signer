@@ -1163,6 +1163,98 @@ class BoundedCallTests(unittest.TestCase):
         self.assertEqual(self.caller.call(lambda: 'ok', timeout=5), 'ok')
 
 
+class ShutdownGraceTests(unittest.TestCase):
+    """Quitting mid-call is what stranded the driver in the first place.
+
+    The wedge is triggered by a process dying while inside a PKCS#11 call. The
+    app is inside one for the ~12s of a cold enumeration and again while
+    signing, so closing the window at the wrong moment leaves the next launch -
+    and every other app on the machine - facing a driver that needs a reboot.
+    """
+
+    def setUp(self):
+        app_module.reset_detection_state()
+        self.addCleanup(app_module.reset_detection_state)
+
+    def test_idle_driver_is_not_busy(self):
+        self.assertFalse(app_module.driver_busy())
+
+    def test_driver_is_busy_while_a_call_runs(self):
+        started, release = threading.Event(), threading.Event()
+
+        def slow():
+            started.set()
+            release.wait(10)
+
+        t = threading.Thread(target=lambda: app_module._pkcs11_caller.call(slow, 0.2),
+                             daemon=True)
+        t.start()
+        self.assertTrue(started.wait(2))
+        self.assertTrue(app_module.driver_busy(), "a running call must count as busy")
+        release.set()
+
+    def test_wait_returns_true_once_the_call_finishes(self):
+        release = threading.Event()
+        threading.Thread(
+            target=lambda: app_module._pkcs11_caller.call(lambda: release.wait(10), 0.2),
+            daemon=True).start()
+        time.sleep(0.3)
+        release.set()
+        self.assertTrue(app_module.wait_for_driver(timeout=5))
+
+    def test_wait_gives_up_on_a_driver_that_never_returns(self):
+        """A wedged call is never coming back; quitting must not hang forever."""
+        release = threading.Event()
+        self.addCleanup(release.set)
+        threading.Thread(
+            target=lambda: app_module._pkcs11_caller.call(lambda: release.wait(30), 0.2),
+            daemon=True).start()
+        time.sleep(0.3)
+        t = time.monotonic()
+        self.assertFalse(app_module.wait_for_driver(timeout=0.5))
+        self.assertLess(time.monotonic() - t, 3, "must not wait past its own deadline")
+
+
+class MainWiringTests(unittest.TestCase):
+    """main.py is the GUI shell, so its mistakes surface only at runtime.
+
+    `from app import app` binds the Flask object, not the module - writing
+    `app.driver_busy()` there parses fine and raises only when the user quits,
+    which no test exercises. These check the seams instead.
+    """
+
+    def _main_source(self):
+        here = os.path.dirname(os.path.abspath(__file__))
+        with open(os.path.join(here, 'main.py')) as fh:
+            return fh.read()
+
+    def test_everything_main_imports_from_app_exists(self):
+        imported = re.findall(r'^from app import (.+)$', self._main_source(), re.MULTILINE)
+        self.assertTrue(imported, "main.py no longer imports from app")
+        names = [n.strip() for line in imported for n in line.split(',')]
+        for name in names:
+            self.assertTrue(hasattr(app_module, name),
+                            f"main.py imports {name!r} from app, which does not define it")
+
+    def test_shutdown_hook_uses_the_module_functions_not_the_flask_object(self):
+        src = self._main_source()
+        self.assertNotIn('app.driver_busy', src,
+                         "`app` here is the Flask object; this raises at quit time")
+        self.assertNotIn('app.wait_for_driver', src,
+                         "`app` here is the Flask object; this raises at quit time")
+
+    def test_the_js_hook_main_calls_is_defined_in_the_template(self):
+        src = self._main_source()
+        called = re.findall(r"evaluate_js\('(\w+)\(\)'\)", src)
+        self.assertTrue(called, "no evaluate_js hook found in main.py")
+        here = os.path.dirname(os.path.abspath(__file__))
+        with open(os.path.join(here, 'templates', 'index.html')) as fh:
+            page = fh.read()
+        for fn in called:
+            self.assertIn(f'function {fn}(', page,
+                          f"main.py calls {fn}() but the page does not define it")
+
+
 class WedgedDriverTests(unittest.TestCase):
     """The Idemia driver can deadlock inside a single get_slots() call.
 
