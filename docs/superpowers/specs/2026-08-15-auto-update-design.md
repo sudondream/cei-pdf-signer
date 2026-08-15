@@ -130,8 +130,16 @@ we do not understand and should not paper over.
 not writable, or the path contains `/AppTranslocation/` (macOS running the app
 read-only from a randomized path, which is what happens to an app launched straight
 out of `Downloads`), the notice still appears but reads *"Descarca v0.14-beta"* and
-opens the release page through the `/api/open-external` route that already exists at
-`app.py:1047`.
+opens the release page.
+
+That gets its own route, `POST /api/update/open-download`, taking **no parameters**.
+The obvious move is to reuse `/api/open-external` at `app.py:1047`, but that route
+deliberately accepts only a key into a fixed `ABOUT_LINKS` table, and `test_app.py`
+has a `test_raw_url_cannot_be_injected` guarding exactly that. A release URL varies
+per version, so reusing the route would mean either widening it to accept URLs —
+undoing the property that test exists to protect — or rewriting the table at runtime.
+The new route instead reads the URL out of server-side update state that only a
+GitHub response ever wrote. The client still cannot name a destination.
 
 Rejected: escalating with `osascript ... with administrator privileges`. An app that
 handles a national identity card asking for an admin password is indistinguishable
@@ -164,12 +172,12 @@ is_installable(path)   -> bool                      writability + translocation
 should_offer_move()    -> Path | None               destination, or None
 download(url, dest, progress_cb)
 verify(zip, extracted, expected_sha, our_team_id)   raises; returns nothing
-stage(src, dest, cleanup) -> helper_script_path     shared by update and move
+relaunch_command(pid, src, dest, cleanup) -> argv   shared by update and move
 ```
 
 Everything takes paths and returns values, so it is testable without launching an app
-or publishing a release. `stage()` is the single writer of the helper script; the
-update and the move differ only in the arguments they hand it.
+or publishing a release. `relaunch_command()` is the single place the helper script
+exists; the update and the move differ only in the arguments they hand it.
 
 A small `prefs.py` reads and writes
 `~/Library/Application Support/ro.cei.pdfsigner/prefs.json`, holding the
@@ -189,12 +197,12 @@ the `driver_busy` / `wait_for_driver` functions it already imports:
 
 ```python
 # main.py, before webview.start()
-app_module.set_relaunch_handler(lambda script: _quit_and_relaunch(script))
+app_module.set_relaunch_handler(_quit_and_relaunch)   # _quit_and_relaunch(argv)
 ```
 
 When verification succeeds, the background thread moves the state to `ready` and
-invokes the handler with the helper script path. `app.py` holds an opaque callable
-and nothing more; `main.py` holds the only code that ends the process.
+invokes the handler with the argv from `relaunch_command()`. `app.py` holds an opaque
+callable and nothing more; `main.py` holds the only code that ends the process.
 
 The overlay is driven by the **frontend**, not by `evaluate_js` from Python — unlike
 the closing screen, this flow starts with a user click, so the page already knows it
@@ -247,10 +255,16 @@ back to the first non-draft entry of `/releases`.
 
 The helper is written once and used by both features, because "wait for this process
 to die, put a bundle at this path, reopen it" describes the update and the move to
-`/Applications` equally. It takes paths and nothing else:
+`/Applications` equally. It takes paths and nothing else.
+
+It is never written to disk. `sh -c '<script>' name arg1 arg2 ...` hands the shell the
+text and the arguments directly, and the shell keeps the script in memory for as long
+as it runs — so there is no temp file to create with the right permissions, no file for
+anything else to tamper with between writing and execution, and no self-deleting
+`rm -f "$0"` trick at the end. `updater.relaunch_command()` returns the argv, which
+makes the whole thing a pure function that tests can assemble and inspect.
 
 ```sh
-#!/bin/sh
 # $1 pid   $2 source bundle   $3 destination   $4 path to delete on success ('' = none)
 set -u
 PID="$1"; SRC="$2"; DEST="$3"; CLEANUP="${4:-}"
@@ -279,7 +293,6 @@ else
 fi
 
 open "$LAUNCH"
-rm -f "$0"                            # unlinks itself; the shell's open fd survives it
 ```
 
 Callers differ only in arguments:
