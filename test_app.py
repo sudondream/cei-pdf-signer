@@ -1554,5 +1554,92 @@ class CurrentVersionTests(unittest.TestCase):
                 self.assertEqual(updater.current_release_tag(), 'dev')
 
 
+def _release(tag, assets=('CEI-PDF-Signer-v0.14-beta-macOS.zip', 'SHA256SUMS.txt'),
+             draft=False):
+    return {
+        'tag_name': tag,
+        'draft': draft,
+        'html_url': 'https://github.com/sudondream/cei-pdf-signer/releases/' + tag,
+        'assets': [{'name': name, 'size': 29360128,
+                    'browser_download_url': 'https://example.invalid/' + name}
+                   for name in assets],
+    }
+
+
+class LatestReleaseTests(unittest.TestCase):
+    """GitHub's /releases/latest hides prereleases. Every tag here is -beta."""
+
+    def test_uses_the_latest_endpoint_when_it_answers(self):
+        calls = []
+
+        def fetch(url):
+            calls.append(url)
+            return _release('v0.14-beta')
+
+        self.assertEqual(updater.latest_release(fetch)['tag_name'], 'v0.14-beta')
+        self.assertEqual(len(calls), 1)
+        self.assertTrue(calls[0].endswith('/releases/latest'))
+
+    def test_falls_back_to_the_list_when_latest_is_absent(self):
+        # The day someone ticks "prerelease", /latest 404s and every installed
+        # app would silently stop seeing updates without this fallback.
+        def fetch(url):
+            if url.endswith('/latest'):
+                raise updater.NotFound()
+            return [_release('v0.14-beta'), _release('v0.13-beta')]
+
+        self.assertEqual(updater.latest_release(fetch)['tag_name'], 'v0.14-beta')
+
+    def test_drafts_are_skipped_in_the_fallback(self):
+        def fetch(url):
+            if url.endswith('/latest'):
+                raise updater.NotFound()
+            return [_release('v0.15-beta', draft=True), _release('v0.14-beta')]
+
+        self.assertEqual(updater.latest_release(fetch)['tag_name'], 'v0.14-beta')
+
+    def test_no_releases_at_all(self):
+        def fetch(url):
+            if url.endswith('/latest'):
+                raise updater.NotFound()
+            return []
+
+        self.assertIsNone(updater.latest_release(fetch))
+
+
+class CheckTests(unittest.TestCase):
+
+    def test_newer_release_is_offered(self):
+        found = updater.check('v0.13-beta', lambda url: _release('v0.14-beta'))
+        self.assertEqual(found.tag, 'v0.14-beta')
+        self.assertEqual(found.zip_url,
+                         'https://example.invalid/CEI-PDF-Signer-v0.14-beta-macOS.zip')
+        self.assertEqual(found.sums_url, 'https://example.invalid/SHA256SUMS.txt')
+        self.assertEqual(found.zip_size, 29360128)
+
+    def test_same_version_offers_nothing(self):
+        self.assertIsNone(
+            updater.check('v0.14-beta', lambda url: _release('v0.14-beta')))
+
+    def test_release_without_our_archive_is_ignored(self):
+        # A release carrying only source tarballs is not something to install.
+        release = _release('v0.14-beta', assets=('Source code.zip', 'SHA256SUMS.txt'))
+        self.assertIsNone(updater.check('v0.13-beta', lambda url: release))
+
+    def test_release_without_checksums_is_ignored(self):
+        release = _release('v0.14-beta', assets=('CEI-PDF-Signer-v0.14-beta-macOS.zip',))
+        self.assertIsNone(updater.check('v0.13-beta', lambda url: release))
+
+    def test_network_failure_is_silent(self):
+        # A signer that cannot reach GitHub is still a working signer.
+        def fetch(url):
+            raise OSError('no route to host')
+
+        self.assertIsNone(updater.check('v0.13-beta', fetch))
+
+    def test_dev_build_never_updates(self):
+        self.assertIsNone(updater.check('dev', lambda url: _release('v0.14-beta')))
+
+
 if __name__ == '__main__':
     unittest.main(verbosity=2)
