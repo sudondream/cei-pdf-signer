@@ -1641,5 +1641,85 @@ class CheckTests(unittest.TestCase):
         self.assertIsNone(updater.check('dev', lambda url: _release('v0.14-beta')))
 
 
+class BundleLocationTests(unittest.TestCase):
+
+    def test_translocation_is_detected(self):
+        # An app opened straight from Downloads runs read-only from a random
+        # path under here, and cannot replace itself.
+        path = pathlib.Path('/private/var/folders/ab/xy/T/AppTranslocation/'
+                            '1234-5678/d/CEI PDF Signer.app')
+        self.assertTrue(updater.is_translocated(path))
+        self.assertFalse(updater.is_installable(path))
+
+    def test_normal_path_is_not_translocated(self):
+        self.assertFalse(
+            updater.is_translocated(pathlib.Path('/Applications/CEI PDF Signer.app')))
+
+    def test_writable_location_is_installable(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            bundle = pathlib.Path(tmp) / 'CEI PDF Signer.app'
+            bundle.mkdir()
+            self.assertTrue(updater.is_installable(bundle))
+
+    def test_read_only_parent_is_not_installable(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            parent = pathlib.Path(tmp) / 'ro'
+            parent.mkdir()
+            bundle = parent / 'CEI PDF Signer.app'
+            bundle.mkdir()
+            os.chmod(parent, 0o500)
+            try:
+                self.assertFalse(updater.is_installable(bundle))
+            finally:
+                os.chmod(parent, 0o700)   # or TemporaryDirectory cannot clean up
+
+
+class MoveDestinationTests(unittest.TestCase):
+    """Each of these must suppress the move prompt on its own."""
+
+    def test_offers_applications_for_a_bundle_in_downloads(self):
+        with tempfile.TemporaryDirectory() as home:
+            bundle = pathlib.Path(home) / 'Downloads' / 'CEI PDF Signer.app'
+            with mock.patch.object(updater, 'APPLICATIONS',
+                                   pathlib.Path(home) / 'Applications'):
+                (pathlib.Path(home) / 'Applications').mkdir()
+                self.assertEqual(
+                    updater.move_destination(bundle, home=home),
+                    pathlib.Path(home) / 'Applications' / 'CEI PDF Signer.app')
+
+    def test_already_in_applications_offers_nothing(self):
+        with tempfile.TemporaryDirectory() as home:
+            apps = pathlib.Path(home) / 'Applications'
+            apps.mkdir()
+            with mock.patch.object(updater, 'APPLICATIONS', apps):
+                self.assertIsNone(
+                    updater.move_destination(apps / 'CEI PDF Signer.app', home=home))
+
+    def test_already_in_home_applications_offers_nothing(self):
+        with tempfile.TemporaryDirectory() as home:
+            user_apps = pathlib.Path(home) / 'Applications'
+            user_apps.mkdir()
+            with mock.patch.object(updater, 'APPLICATIONS', pathlib.Path('/Applications')):
+                self.assertIsNone(
+                    updater.move_destination(user_apps / 'CEI PDF Signer.app',
+                                             home=home))
+
+    def test_unwritable_applications_offers_nothing(self):
+        with tempfile.TemporaryDirectory() as home:
+            apps = pathlib.Path(home) / 'Applications'
+            apps.mkdir()
+            os.chmod(apps, 0o500)
+            try:
+                with mock.patch.object(updater, 'APPLICATIONS', apps):
+                    self.assertIsNone(updater.move_destination(
+                        pathlib.Path(home) / 'Downloads' / 'CEI PDF Signer.app',
+                        home=home))
+            finally:
+                os.chmod(apps, 0o700)
+
+    def test_unfrozen_offers_nothing(self):
+        self.assertIsNone(updater.move_destination(None))
+
+
 if __name__ == '__main__':
     unittest.main(verbosity=2)

@@ -71,6 +71,47 @@ def current_release_tag():
         return 'dev'
 
 
+APPLICATIONS = pathlib.Path('/Applications')
+
+# macOS runs an app launched from a quarantined download out of a randomized
+# read-only mount under this directory, so the bundle cannot replace itself and
+# the path does not say where the original came from.
+_TRANSLOCATION_MARKER = '/AppTranslocation/'
+
+
+def is_translocated(path):
+    return _TRANSLOCATION_MARKER in str(path)
+
+
+def is_installable(path):
+    """Whether we could replace the bundle at this path in place."""
+    if path is None or is_translocated(path):
+        return False
+    return os.access(path.parent, os.W_OK) and os.access(path, os.W_OK)
+
+
+def move_destination(bundle, home=None):
+    """Where this bundle should be moved to, or None if it should not be.
+
+    None whenever the prompt would be pointless or impossible: not frozen,
+    already installed, or nowhere writable to move to. Translocation is *not*
+    excluded - a translocated app is exactly the one most worth moving, and it
+    is readable even though it is not writable.
+    """
+    if bundle is None:
+        return None
+    user_applications = pathlib.Path(home or os.path.expanduser('~')) / 'Applications'
+    for folder in (APPLICATIONS, user_applications):
+        try:
+            bundle.relative_to(folder)
+            return None
+        except ValueError:
+            pass
+    if not os.access(APPLICATIONS, os.W_OK):
+        return None
+    return APPLICATIONS / bundle.name
+
+
 REPO = 'sudondream/cei-pdf-signer'
 RELEASES_URL = 'https://api.github.com/repos/{}/releases'.format(REPO)
 
