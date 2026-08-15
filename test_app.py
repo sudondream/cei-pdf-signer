@@ -1721,5 +1721,129 @@ class MoveDestinationTests(unittest.TestCase):
         self.assertIsNone(updater.move_destination(None))
 
 
+class RelaunchHelperTests(unittest.TestCase):
+    """The helper runs after the app is dead, so it is run for real here.
+
+    'open' is shadowed by a stub on PATH: the tests must not launch anything.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+        self.bin = os.path.join(self.tmp, 'bin')
+        os.makedirs(self.bin)
+        self.opened = os.path.join(self.tmp, 'opened.txt')
+        with open(os.path.join(self.bin, 'open'), 'w') as fh:
+            fh.write('#!/bin/sh\necho "$1" >> %s\n' % self.opened)
+        os.chmod(os.path.join(self.bin, 'open'), 0o755)
+
+    def _bundle(self, name, marker, subdir=''):
+        path = os.path.join(self.tmp, subdir, name)
+        os.makedirs(os.path.join(path, 'Contents'))
+        with open(os.path.join(path, 'Contents', 'marker'), 'w') as fh:
+            fh.write(marker)
+        return path
+
+    def _reaped(self, argv):
+        """Run argv, reaping it the moment it exits.
+
+        An unreaped child stays a zombie, and `kill -0` succeeds on a zombie -
+        so the helper would wait out its full timeout instead of noticing the
+        exit. Production does not have this problem: the app is launched by
+        launchd, which reaps it promptly.
+        """
+        live = subprocess.Popen(argv)
+        threading.Thread(target=live.wait, daemon=True).start()
+        return live
+
+    def _marker(self, bundle):
+        with open(os.path.join(bundle, 'Contents', 'marker')) as fh:
+            return fh.read()
+
+    def _run(self, pid, src, dest, cleanup=''):
+        env = dict(os.environ, PATH=self.bin + os.pathsep + os.environ['PATH'])
+        return subprocess.run(
+            updater.relaunch_command(pid, src, dest, cleanup),
+            env=env, capture_output=True, text=True, timeout=60)
+
+    def _dead_pid(self):
+        """A pid that has already exited and been reaped."""
+        done = subprocess.Popen(['/bin/sh', '-c', 'exit 0'])
+        done.wait()
+        return done.pid
+
+    def test_moves_a_bundle_into_place_and_opens_it(self):
+        src = self._bundle('New.app', 'new')
+        dest = os.path.join(self.tmp, 'Dest.app')
+        self._run(self._dead_pid(), src, dest)
+        self.assertEqual(self._marker(dest), 'new')
+        with open(self.opened) as fh:
+            self.assertEqual(fh.read().strip(), dest)
+
+    def test_replaces_an_existing_bundle(self):
+        # The update case: the staged bundle sits in its own temp dir, and
+        # that whole dir is the cleanup path.
+        src = self._bundle('New.app', 'new', subdir='staging')
+        dest = self._bundle('Dest.app', 'old')
+        self._run(self._dead_pid(), src, dest, cleanup=os.path.dirname(src))
+        self.assertEqual(self._marker(dest), 'new')
+        self.assertFalse(os.path.exists(os.path.dirname(src)))
+
+    def test_cleanup_path_is_removed(self):
+        # The update passes its temp dir here; a normal move passes the
+        # original bundle, so the app does not end up installed twice.
+        src = self._bundle('New.app', 'new')
+        dest = os.path.join(self.tmp, 'Dest.app')
+        self._run(self._dead_pid(), src, dest, cleanup=src)
+        self.assertFalse(os.path.exists(src))
+        self.assertTrue(os.path.exists(dest))
+
+    def test_empty_cleanup_leaves_the_source_alone(self):
+        # The translocated move: the original is unreachable, so nothing is
+        # deleted. An empty argument must not turn into `rm -rf ''`.
+        src = self._bundle('New.app', 'new')
+        dest = os.path.join(self.tmp, 'Dest.app')
+        self._run(self._dead_pid(), src, dest, cleanup='')
+        self.assertTrue(os.path.exists(src))
+        self.assertTrue(os.path.exists(dest))
+
+    def test_failed_copy_restores_the_original(self):
+        # The rollback path, exercised rather than reasoned about. A missing
+        # source makes ditto fail after the destination has been moved aside.
+        dest = self._bundle('Dest.app', 'old')
+        missing = os.path.join(self.tmp, 'Gone.app')
+        self._run(self._dead_pid(), missing, dest)
+        self.assertEqual(self._marker(dest), 'old')
+        with open(self.opened) as fh:
+            self.assertEqual(fh.read().strip(), dest)
+
+    def test_no_leftover_aside_copy_on_success(self):
+        src = self._bundle('New.app', 'new')
+        dest = self._bundle('Dest.app', 'old')
+        self._run(self._dead_pid(), src, dest)
+        leftovers = [n for n in os.listdir(self.tmp) if '.old-' in n]
+        self.assertEqual(leftovers, [])
+
+    def test_it_waits_for_the_process_to_die(self):
+        live = self._reaped(['/bin/sh', '-c', 'sleep 1'])
+        src = self._bundle('New.app', 'new')
+        dest = os.path.join(self.tmp, 'Dest.app')
+        started = time.time()
+        self._run(live.pid, src, dest)
+        self.assertGreaterEqual(time.time() - started, 0.9)
+        self.assertEqual(self._marker(dest), 'new')
+
+    def test_a_process_that_never_dies_touches_nothing(self):
+        # Swapping a bundle under a live process is worse than not updating.
+        live = self._reaped(['/bin/sh', '-c', 'sleep 60'])
+        self.addCleanup(live.kill)
+        src = self._bundle('New.app', 'new')
+        dest = self._bundle('Dest.app', 'old')
+        with mock.patch.object(updater, 'WAIT_TICKS', 3):
+            self._run(live.pid, src, dest)
+        self.assertEqual(self._marker(dest), 'old')
+        self.assertFalse(os.path.exists(self.opened))
+
+
 if __name__ == '__main__':
     unittest.main(verbosity=2)

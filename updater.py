@@ -71,6 +71,61 @@ def current_release_tag():
         return 'dev'
 
 
+# How many 0.1s ticks to wait for the app to exit before giving up. Patched
+# down in tests. Reaching this limit means abandoning the update - swapping a
+# bundle under a live process is worse than not updating at all.
+WAIT_TICKS = 300
+
+# Runs after the app is dead, so it cannot report anything: every branch has to
+# end with a working application on disk.
+#
+# ditto, never cp -R. The bundle has ~45 symlinks and depends on POSIX execute
+# bits; anything that drops them breaks the app silently (issues #4, #6, #7).
+#
+# Never written to a file. `sh -c` keeps the text in memory for the life of the
+# shell, so there is nothing on disk to permission, tamper with, or clean up.
+RELAUNCH_SCRIPT = '''
+set -u
+PID="$1"; SRC="$2"; DEST="$3"; CLEANUP="${4:-}"; TICKS="$5"
+OLD="$DEST.old-$$"
+LAUNCH="$DEST"
+
+i=0
+while kill -0 "$PID" 2>/dev/null; do
+    i=$((i + 1))
+    [ "$i" -gt "$TICKS" ] && exit 1
+    sleep 0.1
+done
+
+[ -e "$DEST" ] && { mv "$DEST" "$OLD" || exit 1; }
+
+if ditto "$SRC" "$DEST"; then
+    rm -rf "$OLD"
+    [ -n "$CLEANUP" ] && rm -rf "$CLEANUP"
+else
+    rm -rf "$DEST"
+    if [ -e "$OLD" ]; then
+        mv "$OLD" "$DEST"
+    else
+        LAUNCH="$SRC"
+    fi
+fi
+
+open "$LAUNCH"
+'''
+
+
+def relaunch_command(pid, src, dest, cleanup=''):
+    """argv that installs `src` at `dest` once `pid` exits, then reopens it.
+
+    Shared by the update and the move to /Applications: the two differ only in
+    what they pass. Returns argv rather than running anything, because this
+    module is not allowed to end the process.
+    """
+    return ['/bin/sh', '-c', RELAUNCH_SCRIPT, 'cei-relaunch',
+            str(pid), str(src), str(dest), str(cleanup or ''), str(WAIT_TICKS)]
+
+
 APPLICATIONS = pathlib.Path('/Applications')
 
 # macOS runs an app launched from a quarantined download out of a randomized
