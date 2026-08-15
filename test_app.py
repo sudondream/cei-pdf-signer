@@ -28,6 +28,7 @@ from unittest import mock
 
 import app as app_module
 import pcsc
+import prefs
 import updater
 
 
@@ -2119,6 +2120,45 @@ class UpdateUiTests(unittest.TestCase):
         self.assertIn('id="file-list"', self.src)
         self.assertIn("className = 'file-item'", self.src)
         self.assertIn("'#file-list .file-item'", self.src)
+
+
+class PrefsTests(unittest.TestCase):
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+        self.file = os.path.join(self.tmp, 'prefs.json')
+        patcher = mock.patch.object(prefs, 'path',
+                                    return_value=pathlib.Path(self.file))
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def test_missing_file_reads_as_empty(self):
+        self.assertEqual(prefs.load(), {})
+
+    def test_round_trip(self):
+        prefs.set('move_declined', True)
+        self.assertTrue(prefs.get('move_declined'))
+        self.assertEqual(prefs.load(), {'move_declined': True})
+
+    def test_corrupt_file_reads_as_empty(self):
+        # The app must start even if this file is garbage. It holds nothing
+        # worth failing a launch over.
+        with open(self.file, 'w') as fh:
+            fh.write('{not json')
+        self.assertEqual(prefs.load(), {})
+
+    def test_a_json_list_reads_as_empty(self):
+        # Valid JSON, wrong shape - .get() would raise on a list.
+        with open(self.file, 'w') as fh:
+            fh.write('["nope"]')
+        self.assertEqual(prefs.load(), {})
+
+    def test_saving_creates_the_directory(self):
+        nested = os.path.join(self.tmp, 'a', 'b', 'prefs.json')
+        with mock.patch.object(prefs, 'path', return_value=pathlib.Path(nested)):
+            prefs.set('x', 1)
+            self.assertTrue(os.path.exists(nested))
 
 
 if __name__ == '__main__':
