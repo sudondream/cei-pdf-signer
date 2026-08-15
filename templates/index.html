@@ -841,6 +841,77 @@
             gap: 5px;
         }
 
+        .update-pill {
+            display: none;
+            background: rgba(0, 212, 255, 0.15);
+            border: 1px solid rgba(0, 212, 255, 0.5);
+            color: #00d4ff;
+            font-size: 12px;
+            padding: 4px 10px;
+            border-radius: 15px;
+            cursor: pointer;
+            margin-right: 10px;
+            transition: all 0.2s;
+        }
+
+        .update-pill:hover {
+            background: rgba(0, 212, 255, 0.28);
+            border-color: #00d4ff;
+        }
+
+        .update-pill.visible {
+            display: flex;
+            align-items: center;
+            gap: 5px;
+        }
+
+        .update-banner {
+            display: none;
+            align-items: center;
+            gap: 12px;
+            padding: 10px 20px;
+            background: rgba(0, 212, 255, 0.12);
+            border-bottom: 1px solid rgba(0, 212, 255, 0.35);
+            color: #cfefff;
+            font-size: 13px;
+        }
+
+        .update-banner.visible { display: flex; }
+        .update-banner .grow { flex: 1; }
+
+        .update-banner button {
+            background: #0099ff;
+            border: none;
+            color: #fff;
+            padding: 5px 14px;
+            border-radius: 6px;
+            cursor: pointer;
+            font-size: 13px;
+        }
+
+        .update-banner .dismiss {
+            background: transparent;
+            color: #8fbfd6;
+            font-size: 16px;
+            padding: 0 4px;
+        }
+
+        .update-progress {
+            width: 260px;
+            height: 6px;
+            border-radius: 3px;
+            background: rgba(0, 212, 255, 0.15);
+            margin-top: 25px;
+            overflow: hidden;
+        }
+
+        .update-progress > div {
+            height: 100%;
+            width: 0;
+            background: #00d4ff;
+            transition: width 0.2s;
+        }
+
         .settings-modal {
             display: none;
             position: fixed;
@@ -961,9 +1032,20 @@
         </div>
     </div>
 
+    <!-- Actualizarea in curs. Pornita de utilizator, deci pagina o conduce
+         singura - spre deosebire de ecranul de inchidere, pe care il aprinde
+         Python prin evaluate_js. -->
+    <div class="loading-screen hidden" id="update-screen">
+        <div class="loading-logo">CEI PDF Signer</div>
+        <div class="loading-spinner"></div>
+        <div class="loading-text" id="update-screen-text">Se descarca actualizarea...</div>
+        <div class="update-progress"><div id="update-progress-bar"></div></div>
+    </div>
+
     <div class="header">
         <h1>CEI PDF Signer</h1>
         <div class="header-status">
+            <span id="update-pill" class="update-pill" onclick="startUpdate()"></span>
             <span id="pkcs11-warning" class="pkcs11-warning" onclick="openSettings()" title="Click to configure the PKCS#11 library path">
                 <span>&#9888;</span><span id="pkcs11-warning-text">PKCS#11 not found</span>
             </span>
@@ -972,6 +1054,17 @@
                 <span class="pulse"></span><span>Searching for card...</span>
             </span>
         </div>
+    </div>
+
+    <!--
+      Anuntul de actualizare. Daca utilizatorul il inchide, oferta nu dispare:
+      devine pastila din header (#update-pill). Cele doua nu apar niciodata
+      simultan.
+    -->
+    <div class="update-banner" id="update-banner">
+        <span class="grow" id="update-banner-text"></span>
+        <button id="update-banner-action" onclick="startUpdate()"></button>
+        <button class="dismiss" onclick="dismissUpdateBanner()" title="Inchide">&times;</button>
     </div>
 
     <div class="main-container">
@@ -2259,6 +2352,92 @@
         }
 
         // Initialize - all operations run independently
+        // --- Actualizare ------------------------------------------------
+        let updateInfo = null;
+        let updateBannerDismissed = false;
+
+        function renderUpdateOffer() {
+            if (!updateInfo) return;
+            const verb = updateInfo.installable ? 'Actualizeaza' : 'Descarca';
+            const text = 'Versiunea ' + updateInfo.tag + ' este disponibila';
+
+            document.getElementById('update-banner-text').textContent = text;
+            document.getElementById('update-banner-action').textContent = verb;
+            document.getElementById('update-banner')
+                .classList.toggle('visible', !updateBannerDismissed);
+
+            const pill = document.getElementById('update-pill');
+            pill.textContent = '↑ ' + verb + ' ' + updateInfo.tag;
+            pill.classList.toggle('visible', updateBannerDismissed);
+        }
+
+        function dismissUpdateBanner() {
+            // Oferta nu dispare, doar se muta in header.
+            updateBannerDismissed = true;
+            document.getElementById('update-banner').classList.remove('visible');
+            document.getElementById('update-pill').classList.add('visible');
+        }
+
+        async function startUpdate() {
+            if (!updateInfo) return;
+
+            if (!updateInfo.installable) {
+                await fetch('/api/update/open-download', {method: 'POST'});
+                return;
+            }
+
+            const queued = document.querySelectorAll('#file-list .file-item').length;
+            if (queued > 0 && !confirm(
+                    'Actualizarea reporneste aplicatia si goleste lista de fisiere. Continui?')) {
+                return;
+            }
+
+            const response = await fetch('/api/update/start', {method: 'POST'});
+            if (!response.ok) {
+                const body = await response.json();
+                alert(body.error || 'Actualizarea nu poate porni acum.');
+                return;
+            }
+            document.getElementById('update-screen').classList.remove('hidden');
+            pollUpdate();
+        }
+
+        async function pollUpdate() {
+            const status = await (await fetch('/api/update/status')).json();
+            const text = document.getElementById('update-screen-text');
+            const bar = document.getElementById('update-progress-bar');
+
+            if (status.stage === 'downloading') {
+                text.textContent = 'Se descarca actualizarea...';
+                bar.style.width = status.percent + '%';
+            } else if (status.stage === 'verifying') {
+                text.textContent = 'Se verifica semnatura...';
+                bar.style.width = '100%';
+            } else if (status.stage === 'ready') {
+                text.textContent = 'Repornim aplicatia...';
+            } else if (status.stage === 'failed') {
+                document.getElementById('update-screen').classList.add('hidden');
+                alert('Actualizarea a esuat: ' + (status.error || 'motiv necunoscut') +
+                      '\n\nAplicatia instalata nu a fost modificata.');
+                return;
+            }
+            setTimeout(pollUpdate, 400);
+        }
+
+        async function checkForUpdate() {
+            try {
+                const status = await (await fetch('/api/update/status')).json();
+                if (status.stage === 'available') {
+                    updateInfo = status;
+                    renderUpdateOffer();
+                    return;
+                }
+                if (status.stage === 'checking') setTimeout(checkForUpdate, 1500);
+            } catch (e) {
+                // O verificare esuata nu are voie sa strice nimic vizibil.
+            }
+        }
+
         window.onload = function() {
             // Check server status (non-blocking)
             fetch('/api/status')
@@ -2278,6 +2457,9 @@
 
             // Initialize sign button state
             updateSignButton();
+
+            // Verificarea porneste in Python la 2 secunde dupa incarcare.
+            setTimeout(checkForUpdate, 2500);
         };
 
         // Click status badge to manually retry detection

@@ -2084,5 +2084,42 @@ class RelaunchWiringTests(unittest.TestCase):
                         'the helper must outlive this process')
 
 
+class UpdateUiTests(unittest.TestCase):
+
+    def setUp(self):
+        here = os.path.dirname(os.path.abspath(__file__))
+        with open(os.path.join(here, 'templates', 'index.html')) as fh:
+            self.src = fh.read()
+
+    def test_banner_and_pill_both_exist(self):
+        self.assertIn('id="update-banner"', self.src)
+        self.assertIn('id="update-pill"', self.src)
+
+    def test_dismissing_the_banner_reveals_the_pill(self):
+        # The offer must survive a dismissal, or it is gone forever.
+        start = self.src.find('function dismissUpdateBanner()')
+        self.assertNotEqual(start, -1, 'dismissUpdateBanner not found')
+        body = self.src[start:self.src.find('function ', start + 10)]
+        self.assertIn("getElementById('update-pill')", body)
+        self.assertIn("classList.add('visible')", body)
+
+    def test_the_frontend_never_supplies_a_download_url(self):
+        # The route takes no parameters; the page must not pretend otherwise.
+        call = re.search(r"fetch\('/api/update/open-download'[^)]*\)", self.src)
+        self.assertIsNotNone(call, 'open-download is never called')
+        self.assertNotIn('body', call.group(0))
+
+    def test_unusable_locations_offer_a_download_instead(self):
+        self.assertIn('installable', self.src)
+        self.assertIn('Descarca', self.src)
+
+    def test_the_file_list_selector_matches_the_real_markup(self):
+        # startUpdate() warns before dropping a queue; a selector that silently
+        # matches nothing would skip the warning and lose the user's files.
+        self.assertIn('id="file-list"', self.src)
+        self.assertIn("className = 'file-item'", self.src)
+        self.assertIn("'#file-list .file-item'", self.src)
+
+
 if __name__ == '__main__':
     unittest.main(verbosity=2)
