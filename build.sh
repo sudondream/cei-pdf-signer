@@ -6,7 +6,13 @@ set -e
 
 cd "$(dirname "$0")"
 
+# Versiunea din tag-ul git, exportata pentru CEIPDFSigner.spec. Se calculeaza
+# aici, nu in build-release.sh, ca un build normal si unul de release sa nu
+# produca aplicatii care raporteaza versiuni diferite.
+export APP_VERSION="${APP_VERSION:-$(git describe --tags --abbrev=0 2>/dev/null || echo dev)}"
+
 echo "=== CEI PDF Signer - Build Script ==="
+echo "Versiune: $APP_VERSION"
 echo ""
 
 # Verifica daca exista environment virtual

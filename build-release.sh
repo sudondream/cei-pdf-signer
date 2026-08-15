@@ -6,8 +6,9 @@ set -e
 
 cd "$(dirname "$0")"
 
-# Obtine versiunea din tag-ul git (sau foloseste "dev" daca nu exista tag)
-VERSION=$(git describe --tags --abbrev=0 2>/dev/null || echo "dev")
+# build.sh calculeaza si exporta APP_VERSION; il folosim pe acelasi, ca numele
+# arhivei si versiunea din Info.plist sa nu poata devia una de alta.
+VERSION="${APP_VERSION:-$(git describe --tags --abbrev=0 2>/dev/null || echo dev)}"
 
 echo "=== CEI PDF Signer - Release Build ==="
 echo "Versiune: $VERSION"

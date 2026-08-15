@@ -13,7 +13,11 @@ No smart card required.
 """
 import ctypes
 import os
+import pathlib
+import plistlib
 import re
+import shutil
+import subprocess
 import tempfile
 import threading
 import time
@@ -23,6 +27,7 @@ from unittest import mock
 
 import app as app_module
 import pcsc
+import updater
 
 
 class FakeSlot:
@@ -1485,6 +1490,68 @@ class NoOpenscToolTests(unittest.TestCase):
         self.assertIsNotNone(warning_map, "PKCS11_WARNING_TEXT not found")
         self.assertNotIn('pkcs11_missing', warning_map.group(1),
                          "a build defect must not be presented as a setting to change")
+
+
+class VersionParsingTests(unittest.TestCase):
+    """Tags are compared as numbers. As strings, v0.9 outranks v0.10."""
+
+    def test_beta_suffix_is_ignored(self):
+        self.assertEqual(updater.parse_version('v0.13-beta'), (0, 13, 0))
+
+    def test_leading_v_is_optional(self):
+        self.assertEqual(updater.parse_version('0.13.2'), (0, 13, 2))
+
+    def test_garbage_does_not_parse(self):
+        for tag in ('dev', '', 'beta', 'v', None):
+            self.assertIsNone(updater.parse_version(tag), tag)
+
+    def test_ten_is_newer_than_nine(self):
+        self.assertTrue(updater.is_newer('v0.10-beta', 'v0.9-beta'))
+        self.assertFalse(updater.is_newer('v0.9-beta', 'v0.10-beta'))
+
+    def test_same_version_is_not_newer(self):
+        self.assertFalse(updater.is_newer('v0.13-beta', 'v0.13-beta'))
+
+    def test_unparseable_never_counts_as_an_update(self):
+        # A tag we cannot read must not trigger a download. Both directions.
+        self.assertFalse(updater.is_newer('banana', 'v0.13-beta'))
+        self.assertFalse(updater.is_newer('v0.99-beta', 'dev'))
+
+    def test_numeric_version_is_dotted_integers_for_apple(self):
+        # CFBundleVersion must be dotted integers or notarization complains.
+        self.assertEqual(updater.numeric_version('v0.13-beta'), '0.13.0')
+        self.assertEqual(updater.numeric_version('dev'), '0.0.0')
+
+
+class CurrentVersionTests(unittest.TestCase):
+
+    def test_unfrozen_reports_dev(self):
+        # Run from source there is no Info.plist, so the updater switches off.
+        with mock.patch.object(updater.sys, 'frozen', False, create=True):
+            self.assertIsNone(updater.bundle_path())
+            self.assertEqual(updater.current_release_tag(), 'dev')
+
+    def test_tag_is_read_from_the_bundle_plist(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            contents = os.path.join(tmp, 'X.app', 'Contents')
+            os.makedirs(os.path.join(contents, 'MacOS'))
+            with open(os.path.join(contents, 'Info.plist'), 'wb') as fh:
+                plistlib.dump({'CEIReleaseTag': 'v0.13-beta'}, fh)
+            exe = os.path.join(contents, 'MacOS', 'X')
+            with mock.patch.object(updater.sys, 'frozen', True, create=True), \
+                 mock.patch.object(updater.sys, 'executable', exe):
+                self.assertEqual(updater.current_release_tag(), 'v0.13-beta')
+
+    def test_missing_key_reports_dev(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            contents = os.path.join(tmp, 'X.app', 'Contents')
+            os.makedirs(os.path.join(contents, 'MacOS'))
+            with open(os.path.join(contents, 'Info.plist'), 'wb') as fh:
+                plistlib.dump({'CFBundleName': 'X'}, fh)
+            exe = os.path.join(contents, 'MacOS', 'X')
+            with mock.patch.object(updater.sys, 'frozen', True, create=True), \
+                 mock.patch.object(updater.sys, 'executable', exe):
+                self.assertEqual(updater.current_release_tag(), 'dev')
 
 
 if __name__ == '__main__':
