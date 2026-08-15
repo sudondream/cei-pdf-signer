@@ -1944,5 +1944,114 @@ class VerifyTests(unittest.TestCase):
         self.assertEqual(seen, [])
 
 
+class UpdateStatusTests(unittest.TestCase):
+
+    def setUp(self):
+        app_module.app.config['TESTING'] = True
+        self.client = app_module.app.test_client()
+        app_module.reset_update_state()
+
+    def test_idle_by_default(self):
+        body = self.client.get('/api/update/status').get_json()
+        self.assertEqual(body['stage'], 'idle')
+        self.assertIsNone(body['tag'])
+
+    def test_available_after_a_check_finds_one(self):
+        found = updater.Update('v0.14-beta', 'https://example.invalid/a.zip',
+                               10, 'https://example.invalid/SHA256SUMS.txt',
+                               'https://example.invalid/page')
+        with mock.patch.object(app_module.updater, 'check', return_value=found), \
+             mock.patch.object(app_module.updater, 'is_installable', return_value=True):
+            app_module.start_update_check().join(5)
+        body = self.client.get('/api/update/status').get_json()
+        self.assertEqual(body['stage'], 'available')
+        self.assertEqual(body['tag'], 'v0.14-beta')
+        self.assertTrue(body['installable'])
+
+    def test_a_failed_check_stays_idle(self):
+        # A signer that cannot reach GitHub is still a working signer.
+        with mock.patch.object(app_module.updater, 'check', return_value=None):
+            app_module.start_update_check().join(5)
+        self.assertEqual(
+            self.client.get('/api/update/status').get_json()['stage'], 'idle')
+
+
+class UpdateStartTests(unittest.TestCase):
+
+    def setUp(self):
+        app_module.app.config['TESTING'] = True
+        self.client = app_module.app.test_client()
+        app_module.reset_update_state()
+        self.found = updater.Update('v0.14-beta', 'https://example.invalid/a.zip',
+                                    10, 'https://example.invalid/SHA256SUMS.txt',
+                                    'https://example.invalid/page')
+
+    def _make_available(self):
+        with mock.patch.object(app_module.updater, 'check', return_value=self.found), \
+             mock.patch.object(app_module.updater, 'is_installable', return_value=True):
+            app_module.start_update_check().join(5)
+
+    def test_start_is_rejected_when_nothing_is_available(self):
+        self.assertEqual(self.client.post('/api/update/start').status_code, 409)
+
+    def test_start_is_rejected_while_the_card_driver_is_busy(self):
+        # Restarting mid-PKCS#11 is what wedges the driver until reboot.
+        self._make_available()
+        with mock.patch.object(app_module, 'driver_busy', return_value=True):
+            self.assertEqual(self.client.post('/api/update/start').status_code, 409)
+
+    def test_start_is_rejected_when_the_bundle_cannot_be_replaced(self):
+        with mock.patch.object(app_module.updater, 'check', return_value=self.found), \
+             mock.patch.object(app_module.updater, 'is_installable', return_value=False):
+            app_module.start_update_check().join(5)
+        self.assertEqual(self.client.post('/api/update/start').status_code, 409)
+
+    def test_start_is_rejected_twice(self):
+        self._make_available()
+        with mock.patch.object(app_module, '_run_update', lambda: None):
+            self.assertEqual(self.client.post('/api/update/start').status_code, 200)
+            self.assertEqual(self.client.post('/api/update/start').status_code, 409)
+
+
+class UpdateDownloadLinkTests(unittest.TestCase):
+    """The fallback opener must not become an arbitrary-URL opener.
+
+    /api/open-external is guarded by test_raw_url_cannot_be_injected; this
+    route takes no parameters at all, so the same property holds by shape.
+    """
+
+    def setUp(self):
+        app_module.app.config['TESTING'] = True
+        self.client = app_module.app.test_client()
+        app_module.reset_update_state()
+
+    def _found(self, page_url):
+        found = updater.Update('v0.14-beta', 'z', 10, 's', page_url)
+        with mock.patch.object(app_module.updater, 'check', return_value=found), \
+             mock.patch.object(app_module.updater, 'is_installable', return_value=False):
+            app_module.start_update_check().join(5)
+
+    def test_opens_the_stored_release_page(self):
+        url = 'https://github.com/sudondream/cei-pdf-signer/releases/v0.14-beta'
+        self._found(url)
+        with mock.patch.object(app_module.subprocess, 'run') as run:
+            resp = self.client.post('/api/update/open-download')
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(run.call_args[0][0], ['open', url])
+
+    def test_a_url_in_the_body_is_ignored(self):
+        self._found('https://real.example')
+        with mock.patch.object(app_module.subprocess, 'run') as run:
+            self.client.post('/api/update/open-download',
+                             json={'url': 'https://evil.example.com'})
+        self.assertEqual(run.call_args[0][0], ['open', 'https://real.example'])
+
+    def test_nothing_to_open_is_rejected(self):
+        with mock.patch.object(app_module.subprocess, 'run') as run:
+            resp = self.client.post('/api/update/open-download')
+        self.assertEqual(resp.status_code, 400)
+        run.assert_not_called()
+
+
 if __name__ == '__main__':
     unittest.main(verbosity=2)
