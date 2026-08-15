@@ -1,4 +1,4 @@
-# In-App Auto-Update
+# In-App Auto-Update and Move to Applications
 
 Date: 2026-08-15
 Status: approved
@@ -11,6 +11,14 @@ progress bar, the window closing, and the window coming back on the new version.
 
 Today there is no update path at all. Users learn about new versions only by
 revisiting the site, and every upgrade is a manual download-extract-drag.
+
+Alongside it, the first-launch "Move to Applications folder?" prompt that most Mac
+apps show. That is not a separate courtesy: an app running from `Downloads` is one
+the updater has to refuse, so every install this relocates converts a
+degrade-to-a-download-link case into a working auto-update — and moves the app out of
+TCC-protected territory at the same time. The two features also share their
+mechanism, since "wait for this process to die, put a bundle at this path, reopen it"
+describes both.
 
 ## Prerequisite: The App Does Not Know Its Own Version
 
@@ -150,14 +158,23 @@ bundle at X and a helper script at Y, ready when you are."
 ```
 current_release_tag()  -> 'v0.13-beta' | 'dev'      reads own Info.plist
 check(timeout=5)       -> Update | None             GitHub API, no side effects
+bundle_path()          -> Path | None               None when not frozen
+is_translocated(path)  -> bool
 is_installable(path)   -> bool                      writability + translocation
+should_offer_move()    -> Path | None               destination, or None
 download(url, dest, progress_cb)
 verify(zip, extracted, expected_sha, our_team_id)   raises; returns nothing
-stage(extracted, dest) -> helper_script_path
+stage(src, dest, cleanup) -> helper_script_path     shared by update and move
 ```
 
 Everything takes paths and returns values, so it is testable without launching an app
-or publishing a release.
+or publishing a release. `stage()` is the single writer of the helper script; the
+update and the move differ only in the arguments they hand it.
+
+A small `prefs.py` reads and writes
+`~/Library/Application Support/ro.cei.pdfsigner/prefs.json`, holding the
+"don't ask again" flag for the move prompt. Corrupt or unreadable JSON is treated as
+an empty preferences file — the app must start even if this file is garbage.
 
 `main.py` owns the trigger, because it already owns the window and the driver-drain
 rule at `main.py:191`. Update-and-restart is the existing close path with one extra
@@ -228,30 +245,50 @@ back to the first non-draft entry of `/releases`.
    normal quit, process exits.
 6. The helper takes over.
 
+The helper is written once and used by both features, because "wait for this process
+to die, put a bundle at this path, reopen it" describes the update and the move to
+`/Applications` equally. It takes paths and nothing else:
+
 ```sh
 #!/bin/sh
-# $1 pid   $2 staged bundle   $3 installed bundle   $4 temp dir
+# $1 pid   $2 source bundle   $3 destination   $4 path to delete on success ('' = none)
 set -u
-PID="$1"; NEW="$2"; DEST="$3"; TMP="$4"
+PID="$1"; SRC="$2"; DEST="$3"; CLEANUP="${4:-}"
 OLD="$DEST.old-$$"
+LAUNCH="$DEST"
 
 i=0
 while kill -0 "$PID" 2>/dev/null; do
     i=$((i + 1))
-    [ "$i" -gt 300 ] && { rm -rf "$TMP"; exit 1; }   # 30s: never swap under a live app
+    [ "$i" -gt 300 ] && exit 1        # 30s; never touch a bundle under a live process
     sleep 0.1
 done
 
-mv "$DEST" "$OLD" || { rm -rf "$TMP"; exit 1; }
-if ditto "$NEW" "$DEST"; then
+[ -e "$DEST" ] && { mv "$DEST" "$OLD" || exit 1; }
+
+if ditto "$SRC" "$DEST"; then
     rm -rf "$OLD"
+    [ -n "$CLEANUP" ] && rm -rf "$CLEANUP"
 else
     rm -rf "$DEST"
-    mv "$OLD" "$DEST"      # a failed update ends with a working app
+    if [ -e "$OLD" ]; then
+        mv "$OLD" "$DEST"             # a failed run ends with a working app...
+    else
+        LAUNCH="$SRC"                 # ...or with the one we were trying to move
+    fi
 fi
-open "$DEST"
-rm -rf "$TMP"              # unlinks itself; the shell's open fd survives it
+
+open "$LAUNCH"
+rm -f "$0"                            # unlinks itself; the shell's open fd survives it
 ```
+
+Callers differ only in arguments:
+
+| | `SRC` | `DEST` | `CLEANUP` |
+|---|---|---|---|
+| Update | staged bundle in temp dir | the running app's path | the temp dir |
+| Move | the running app's path | `/Applications/CEI PDF Signer.app` | the running app's path |
+| Move, translocated | the running (read-only) app's path | same | `''` — original is unreachable |
 
 `ditto` rather than `cp -R`, for the same reason `build-release.sh:93` uses it: the
 bundle contains ~45 symlinks and depends on POSIX execute bits, and tools that do not
@@ -260,6 +297,51 @@ preserve them break the app silently.
 **When not to offer it.** `driver_busy()` blocks the start route — restarting
 mid-PKCS#11 is the one thing this codebase most wants to avoid. A non-empty file list
 puts a one-line confirm behind the button, since the restart drops the queue.
+
+## Move to Applications on First Launch
+
+The prompt every Mac app shows — LetsMove / `PFMoveApplication` — implemented on the
+helper above.
+
+**Where it fires.** The first thing `start_app` does in `main.py`, before Flask boots;
+there is no sense starting a server we are about to kill. `window.create_confirmation_dialog()`
+(confirmed present in the installed pywebview) puts a real native dialog over the
+loading screen, which is what makes it read as a normal Mac app rather than an
+in-page HTML box.
+
+**Conditions, all required.** Frozen bundle; not already under `/Applications` or
+`~/Applications`; destination writable; not previously declined. Run from source it
+never fires, same as the updater.
+
+**Translocation** is the awkward case and also the common one: an app launched
+straight out of `Downloads` runs from a read-only randomized path under
+`/private/var/folders/.../AppTranslocation/`, and that path does not say where the
+original came from.
+
+**Chosen:** copy the running bundle into `/Applications`, launch that, leave the
+original where it is. The translocated bundle is a complete, readable, signed copy —
+copying *it* produces a correct installation.
+
+Rejected: recovering the original path via `SecTranslocateCreateOriginalPathForURL`
+from Security.framework, which is what LetsMove does. It means hand-written ctypes
+bindings and CFURL marshalling to solve a tidiness problem — the cost is a leftover
+app in `Downloads`, sitting next to the ZIP the user still has anyway.
+
+**"Don't ask again" needs a Python-side file.** The existing `pkcs11_path` preference
+lives in the webview's `localStorage` (`templates/index.html:1227`), which Python
+cannot reach this early in startup, and which the move happens before in any case.
+So a small `~/Library/Application Support/ro.cei.pdfsigner/prefs.json` — conventional
+location, a few lines, and useful for whatever comes next.
+
+**Quarantine.** A moved bundle keeps its `com.apple.quarantine` attribute, so the
+first launch from `/Applications` may show the one-time "downloaded from the Internet,
+are you sure?" confirmation — a single OK rather than a block, because the app is
+notarized. This does *not* contradict the updater's rule that quarantine must be
+absent: that rule governs bundles we download ourselves via Python, which
+LaunchServices never stamps. The two paths differ, and so do their expectations.
+
+Dialog text is Romanian, matching the loading and closing screens — the other
+Python-owned strings in the app.
 
 ## Failure Modes
 
@@ -275,6 +357,10 @@ puts a one-line confirm behind the button, since the restart drops the queue.
 | App process never exits | Helper times out at 30s having touched nothing. |
 | Two updates started at once | Start route 409s outside the `available` state. |
 | Installed version turns out to be broken | Out of scope; manual download of an older release. |
+| Move declined | Flag written to `prefs.json`; never asked again. App continues normally. |
+| `prefs.json` corrupt or unreadable | Treated as empty. The app must start regardless. |
+| `/Applications` already holds a copy | Helper moves it aside and restores it if the copy fails, same as an update. |
+| Move fails to copy | Original is opened instead — the app the user launched still runs. |
 
 **Known wrinkle.** The helper writes wherever the app lives. `/Applications` needs no
 special permission, which is where the install instructions already send people. But
@@ -296,13 +382,20 @@ network:
   containing `AppTranslocation`.
 - **Verification refusing bad input.** Wrong checksum; a Team ID that does not match
   the running app's.
+- **Move conditions.** Already in `/Applications`; already in `~/Applications`;
+  translocated; declined previously; not frozen. Each must suppress the prompt on its
+  own.
+- **Preferences.** Round-trip; missing file; corrupt JSON returning empty rather than
+  raising.
 
 **The helper script is tested directly**, because it is the code that runs when the
 app is dead and cannot report anything. It is a shell script over paths, so a test
-hands it a `sleep` process and two temp directories and asserts the swap happened,
-the temp directory was cleaned, and the app was reopened. The same test with an
-unwritable destination asserts the original came back intact — the rollback path
-exercised for real rather than reasoned about.
+hands it a `sleep` process and two temp directories and asserts the bundle arrived,
+the cleanup path was removed, and the app was reopened. Then the variants that matter:
+a destination that already exists (the update case), an empty `CLEANUP` argument (the
+translocated move), and an unwritable destination, which must leave the original
+intact and open *it*. That last one is the rollback path, exercised for real rather
+than reasoned about.
 
 **Not covered by any of that:** a real signed bundle replacing itself in
 `/Applications` and reopening. That is one manual run against a scratch copy before
@@ -316,3 +409,7 @@ than pretended into a unit test.
 - Update channels (stable vs beta). Every release is a beta today.
 - Downgrades and pinning.
 - Auto-rollback from a working install of a broken version.
+- Deleting the original after a translocated move; it needs Security.framework
+  bindings to buy tidiness.
+- Migrating the `pkcs11_path` preference out of `localStorage` into `prefs.json`.
+  It works where it is; moving it is a separate change with its own risk.
