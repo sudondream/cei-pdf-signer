@@ -27,6 +27,9 @@ CEI PDF Signer allows you to digitally sign PDF documents using the qualified ce
 - Automatic smart card reader detection
 - Direct export to Downloads folder
 - Configurable PKCS#11 library path
+- **Automatic updates**: the app checks GitHub for new releases and can install
+  them itself. Downloads are verified against the project's Developer ID
+  signature and Apple's notarization before anything is replaced.
 
 ### Requirements
 
@@ -165,6 +168,9 @@ CEI PDF Signer permite semnarea digitala a documentelor PDF folosind certificatu
 - Detectare automata a cititorului de carduri
 - Export direct in folderul Downloads
 - Configurare cale biblioteca PKCS#11
+- **Actualizari automate**: aplicatia verifica singura daca a aparut o versiune
+  noua si o poate instala. Descarcarea este verificata prin semnatura Developer
+  ID a proiectului si prin notarizarea Apple inainte sa fie inlocuit ceva.
 
 ### Cerinte
 
