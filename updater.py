@@ -8,11 +8,13 @@ that dying carelessly violates.
 """
 
 import collections
+import hashlib
 import json
 import os
 import pathlib
 import plistlib
 import re
+import subprocess
 import sys
 import urllib.error
 import urllib.request
@@ -246,3 +248,90 @@ def check(current_tag, fetch=fetch_json):
     if not release or not is_newer(release.get('tag_name'), current_tag):
         return None
     return _to_update(release)
+
+
+class VerificationError(Exception):
+    """The download is not what it claims to be."""
+
+
+# codesign prints "TeamIdentifier=not set" for an ad-hoc bundle, which a naive
+# \S+ captures as the team "not" - so two unsigned bundles would compare equal
+# and pass the check that exists to stop exactly that.
+_TEAM_RE = re.compile(r'^TeamIdentifier=(?!not set$)(\S+)', re.MULTILINE)
+
+
+def sha256(path):
+    digest = hashlib.sha256()
+    with open(path, 'rb') as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b''):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def expected_sha(sums_text, filename):
+    """The digest for `filename` out of a SHA256SUMS.txt body."""
+    for line in (sums_text or '').splitlines():
+        parts = line.split()
+        if len(parts) == 2 and parts[1].lstrip('*') == filename:
+            return parts[0]
+    return None
+
+
+def team_identifier(path, run=subprocess.run):
+    """The Developer ID team a bundle is signed by, or None."""
+    done = run(['codesign', '-dv', '--verbose=2', str(path)],
+               capture_output=True, text=True)
+    match = _TEAM_RE.search(done.stderr or '')
+    return match.group(1) if match else None
+
+
+def download(url, dest, progress=None, timeout=30):
+    """Fetch `url` to `dest`, calling progress(done_bytes, total_bytes)."""
+    request = urllib.request.Request(
+        url, headers={'User-Agent': 'cei-pdf-signer'})
+    with urllib.request.urlopen(request, timeout=timeout) as response:
+        total = int(response.headers.get('Content-Length') or 0)
+        done = 0
+        with open(dest, 'wb') as handle:
+            while True:
+                chunk = response.read(256 * 1024)
+                if not chunk:
+                    break
+                handle.write(chunk)
+                done += len(chunk)
+                if progress:
+                    progress(done, total)
+
+
+def verify(zip_path, bundle, want_sha, want_team, run=subprocess.run):
+    """Raise VerificationError unless this is genuinely our next release.
+
+    Order matters: the cheap digest runs before anything spawns a process.
+
+    The signature checks carry the weight, not the checksum. A digest fetched
+    from the same host as the file it describes proves only that the download
+    was not truncated - whoever could swap the archive could swap the sums file
+    beside it. Only the signature proves the bundle was signed by this
+    project's Developer ID and notarized by Apple.
+    """
+    if sha256(zip_path) != want_sha:
+        raise VerificationError('suma de control nu corespunde')
+
+    if run(['codesign', '--verify', '--deep', '--strict', str(bundle)],
+           capture_output=True, text=True).returncode != 0:
+        raise VerificationError('semnatura este invalida')
+
+    found_team = team_identifier(bundle, run=run)
+    if not want_team or not found_team or found_team != want_team:
+        raise VerificationError(
+            'semnat de alta echipa: %s' % (found_team or 'nesemnat',))
+
+    if run(['spctl', '-a', '-t', 'exec', str(bundle)],
+           capture_output=True, text=True).returncode != 0:
+        raise VerificationError('aplicatia nu este notarizata')
+
+    # We fetch with Python, so LaunchServices never stamps this. Its presence
+    # means something we do not understand happened; assert rather than strip.
+    attrs = run(['xattr', str(bundle)], capture_output=True, text=True).stdout
+    if 'com.apple.quarantine' in (attrs or ''):
+        raise VerificationError('descarcarea este marcata ca fiind din internet')

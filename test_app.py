@@ -1845,5 +1845,104 @@ class RelaunchHelperTests(unittest.TestCase):
         self.assertFalse(os.path.exists(self.opened))
 
 
+class ChecksumTests(unittest.TestCase):
+
+    def test_sha256_of_a_file(self):
+        with tempfile.NamedTemporaryFile(delete=False) as fh:
+            fh.write(b'hello')
+        self.addCleanup(os.unlink, fh.name)
+        self.assertEqual(
+            updater.sha256(fh.name),
+            '2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824')
+
+    def test_expected_sha_picks_the_right_line(self):
+        sums = ('aaaa  OTHER.zip\n'
+                'bbbb  CEI-PDF-Signer-v0.14-beta-macOS.zip\n')
+        self.assertEqual(
+            updater.expected_sha(sums, 'CEI-PDF-Signer-v0.14-beta-macOS.zip'), 'bbbb')
+
+    def test_expected_sha_missing_entry(self):
+        self.assertIsNone(updater.expected_sha('aaaa  OTHER.zip\n', 'ours.zip'))
+
+
+class VerifyTests(unittest.TestCase):
+    """Every check must be able to fail the whole verification on its own."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+        self.zip = os.path.join(self.tmp, 'a.zip')
+        with open(self.zip, 'wb') as fh:
+            fh.write(b'hello')
+        self.sha = ('2cf24dba5fb0a30e26e83b2ac5b9e29e'
+                    '1b161e5c1fa7425e73043362938b9824')
+        self.bundle = os.path.join(self.tmp, 'X.app')
+        os.makedirs(self.bundle)
+
+    def _run(self, ok=True, team='ABCD1234', quarantined=False):
+        def fake(argv, **kwargs):
+            if argv[0] == 'codesign' and '-dv' in argv:
+                return subprocess.CompletedProcess(
+                    argv, 0, '', 'TeamIdentifier=%s\n' % team)
+            if argv[0] == 'xattr':
+                out = 'com.apple.quarantine\n' if quarantined else ''
+                return subprocess.CompletedProcess(argv, 0, out, '')
+            return subprocess.CompletedProcess(argv, 0 if ok else 1, '', 'nope')
+        return fake
+
+    def test_a_good_bundle_verifies(self):
+        updater.verify(self.zip, self.bundle, self.sha, 'ABCD1234',
+                       run=self._run())
+
+    def test_wrong_checksum_is_refused(self):
+        with self.assertRaises(updater.VerificationError):
+            updater.verify(self.zip, self.bundle, 'deadbeef', 'ABCD1234',
+                           run=self._run())
+
+    def test_a_different_team_is_refused(self):
+        # The check that actually matters: a bundle signed by someone else is
+        # not ours, whatever the release page says.
+        with self.assertRaises(updater.VerificationError):
+            updater.verify(self.zip, self.bundle, self.sha, 'ABCD1234',
+                           run=self._run(team='EVIL0000'))
+
+    def test_a_broken_signature_is_refused(self):
+        with self.assertRaises(updater.VerificationError):
+            updater.verify(self.zip, self.bundle, self.sha, 'ABCD1234',
+                           run=self._run(ok=False))
+
+    def test_quarantined_download_is_refused(self):
+        # We fetch with Python, so LaunchServices never stamps this. Finding it
+        # means something happened that we do not understand.
+        with self.assertRaises(updater.VerificationError):
+            updater.verify(self.zip, self.bundle, self.sha, 'ABCD1234',
+                           run=self._run(quarantined=True))
+
+    def test_an_adhoc_bundle_has_no_team(self):
+        # codesign says "TeamIdentifier=not set" for ad-hoc. Read naively that
+        # is the team "not", and two unsigned bundles would compare equal.
+        def fake(argv, **kwargs):
+            return subprocess.CompletedProcess(
+                argv, 0, '', 'TeamIdentifier=not set\n')
+
+        self.assertIsNone(updater.team_identifier(self.bundle, run=fake))
+
+    def test_an_unsigned_download_is_refused(self):
+        with self.assertRaises(updater.VerificationError):
+            updater.verify(self.zip, self.bundle, self.sha, None,
+                           run=self._run(team='not set'))
+
+    def test_checksum_is_checked_before_anything_expensive(self):
+        seen = []
+
+        def fake(argv, **kwargs):
+            seen.append(argv[0])
+            return subprocess.CompletedProcess(argv, 0, '', 'TeamIdentifier=X\n')
+
+        with self.assertRaises(updater.VerificationError):
+            updater.verify(self.zip, self.bundle, 'deadbeef', 'X', run=fake)
+        self.assertEqual(seen, [])
+
+
 if __name__ == '__main__':
     unittest.main(verbosity=2)
