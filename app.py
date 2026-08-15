@@ -1175,7 +1175,13 @@ def api_update_status():
 @app.route('/api/update/start', methods=['POST'])
 def api_update_start():
     with _update_state.lock:
-        if _update_state.stage != 'available' or not _update_state.installable:
+        # 'failed' este retryabil: o descarcare intrerupta nu inseamna ca
+        # actualizarea a disparut, iar bannerul o ofera in continuare. Fara
+        # asta, un al doilea click raspundea "Nicio actualizare disponibila"
+        # despre exact actualizarea afisata pe ecran.
+        if _update_state.stage not in ('available', 'failed'):
+            return jsonify({'error': 'Actualizarea este deja in curs'}), 409
+        if _update_state.update is None or not _update_state.installable:
             return jsonify({'error': 'Nicio actualizare disponibila'}), 409
         if driver_busy():
             return jsonify({'error': 'Se lucreaza cu cardul'}), 409

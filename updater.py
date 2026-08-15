@@ -198,20 +198,34 @@ def fetch_json(url, timeout=5):
 
 
 def latest_release(fetch=fetch_json):
-    """The newest published release as GitHub's JSON, or None.
+    """The newest installable release as GitHub's JSON, or None.
 
-    /releases/latest excludes prereleases. Nothing published so far is flagged
-    as one, but the day something is, that endpoint 404s and every installed
-    app goes quiet - hence the fallback to the full list.
+    Reads the full list rather than /releases/latest, for two reasons.
+
+    That endpoint returns the newest *non-prerelease* release and 404s only
+    when every release is a prerelease - so it cannot be used to notice that a
+    prerelease exists, which an earlier version of this code assumed it could.
+    With a stable release and a newer prerelease it simply answers with the
+    stable one, no error, and the fallback that was supposed to catch it never
+    runs.
+
+    And the list arrives ordered by creation date, not by version. This
+    repository has already seen GitHub order that list in a way nobody
+    expected, so "the first entry" is not the same claim as "the newest
+    version" - hence max() over parsed versions.
+
+    Drafts and prereleases are skipped: flagging a release as either is a
+    deliberate statement that it is not meant for everyone yet. Tags that do
+    not parse are skipped too, since an update we cannot order is one we
+    cannot know is an upgrade.
     """
-    try:
-        return fetch(RELEASES_URL + '/latest')
-    except NotFound:
-        pass
-    for release in fetch(RELEASES_URL) or []:
-        if not release.get('draft'):
-            return release
-    return None
+    candidates = [release for release in (fetch(RELEASES_URL) or [])
+                  if not release.get('draft')
+                  and not release.get('prerelease')
+                  and parse_version(release.get('tag_name')) is not None]
+    if not candidates:
+        return None
+    return max(candidates, key=lambda release: parse_version(release['tag_name']))
 
 
 def _to_update(release):

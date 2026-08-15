@@ -233,10 +233,21 @@ Tags parse as `v?(\d+)\.(\d+)(?:\.(\d+))?` with the `-beta` suffix ignored, comp
 as integer tuples — string comparison would rank `v0.9` above `v0.10`. An unparseable
 tag counts as "no update," never as "update available."
 
-`/releases/latest` **excludes prereleases.** Every tag this project has published ends
-in `-beta` but none is flagged prerelease on GitHub, so it works today. The day that
-box gets ticked, every installed app silently stops seeing updates. So: on 404, fall
-back to the first non-draft entry of `/releases`.
+**Corrected after review.** An earlier version of this design used
+`/releases/latest` with a 404 fallback, on the belief that flagging a release as
+prerelease would make that endpoint 404 and silence every installed app. That is not
+how it behaves: it returns the newest *non-prerelease* release and 404s only when
+**every** release is a prerelease. With a stable release and a newer prerelease it
+answers with the stable one, no error, and a 404 fallback never runs.
+
+So the checker reads `/releases` directly and takes `max()` over parsed versions of
+the non-draft, non-prerelease entries. That also fixes a second problem: the list is
+ordered by creation date, not version, and this repository has already seen GitHub
+order it unexpectedly — a live call today returns `v0.10-beta` *after* `v0.8-beta`.
+"The first entry" and "the newest version" are different claims.
+
+Skipping prereleases is deliberate rather than incidental: ticking that box is a
+statement that a release is not meant for everyone yet.
 
 **Install**, one click:
 

@@ -2402,8 +2402,21 @@
             pollUpdate();
         }
 
+        // Etapele in care mai are rost sa asteptam. Orice altceva opreste
+        // pollingul: altfel o stare neasteptata lasa ecranul plin peste tot,
+        // de doua ori pe secunda, fara nicio iesire.
+        const UPDATE_IN_FLIGHT = ['downloading', 'verifying', 'ready'];
+
         async function pollUpdate() {
-            const status = await (await fetch('/api/update/status')).json();
+            let status;
+            try {
+                status = await (await fetch('/api/update/status')).json();
+            } catch (e) {
+                // Pe drumul fericit aplicatia se inchide ca sa se instaleze,
+                // deci cererea in zbor pica. Nu este o eroare de raportat.
+                return;
+            }
+
             const text = document.getElementById('update-screen-text');
             const bar = document.getElementById('update-progress-bar');
 
@@ -2415,13 +2428,18 @@
                 bar.style.width = '100%';
             } else if (status.stage === 'ready') {
                 text.textContent = 'Repornim aplicatia...';
-            } else if (status.stage === 'failed') {
-                document.getElementById('update-screen').classList.add('hidden');
-                alert('Actualizarea a esuat: ' + (status.error || 'motiv necunoscut') +
-                      '\n\nAplicatia instalata nu a fost modificata.');
+            }
+
+            if (UPDATE_IN_FLIGHT.includes(status.stage)) {
+                setTimeout(pollUpdate, 400);
                 return;
             }
-            setTimeout(pollUpdate, 400);
+
+            document.getElementById('update-screen').classList.add('hidden');
+            if (status.stage === 'failed') {
+                alert('Actualizarea a esuat: ' + (status.error || 'motiv necunoscut') +
+                      '\n\nAplicatia instalata nu a fost modificata. Poti incerca din nou.');
+            }
         }
 
         async function checkForUpdate() {

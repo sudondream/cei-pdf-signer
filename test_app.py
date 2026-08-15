@@ -1525,6 +1525,18 @@ class VersionParsingTests(unittest.TestCase):
         self.assertFalse(updater.is_newer('banana', 'v0.13-beta'))
         self.assertFalse(updater.is_newer('v0.99-beta', 'dev'))
 
+    def test_a_suffixed_hotfix_is_NOT_seen_as_newer(self):
+        """Known limitation, pinned so it cannot surprise anyone.
+
+        The comparator reads only the numeric part, so v0.14-beta2 and
+        v0.14-beta are equal and a suffix-only hotfix reaches nobody. The
+        release rule is therefore to bump the patch number - v0.14.1-beta,
+        which parses to (0, 14, 1) and does ship. See
+        scripts/verify-update-manually.md.
+        """
+        self.assertFalse(updater.is_newer('v0.14-beta2', 'v0.14-beta'))
+        self.assertTrue(updater.is_newer('v0.14.1-beta', 'v0.14-beta'))
+
     def test_numeric_version_is_dotted_integers_for_apple(self):
         # CFBundleVersion must be dotted integers or notarization complains.
         self.assertEqual(updater.numeric_version('v0.13-beta'), '0.13.0')
@@ -1563,10 +1575,11 @@ class CurrentVersionTests(unittest.TestCase):
 
 
 def _release(tag, assets=('CEI-PDF-Signer-v0.14-beta-macOS.zip', 'SHA256SUMS.txt'),
-             draft=False):
+             draft=False, prerelease=False):
     return {
         'tag_name': tag,
         'draft': draft,
+        'prerelease': prerelease,
         'html_url': 'https://github.com/sudondream/cei-pdf-signer/releases/' + tag,
         'assets': [{'name': name, 'size': 29360128,
                     'browser_download_url': 'https://example.invalid/' + name}
@@ -1575,50 +1588,72 @@ def _release(tag, assets=('CEI-PDF-Signer-v0.14-beta-macOS.zip', 'SHA256SUMS.txt
 
 
 class LatestReleaseTests(unittest.TestCase):
-    """GitHub's /releases/latest hides prereleases. Every tag here is -beta."""
+    """Reads the whole list, because neither shortcut is trustworthy.
 
-    def test_uses_the_latest_endpoint_when_it_answers(self):
+    /releases/latest returns the newest NON-prerelease release and 404s only
+    when every release is a prerelease - so it cannot be used to notice that a
+    prerelease exists. And /releases arrives ordered by creation date, which
+    this repository has already seen GitHub get wrong.
+    """
+
+    def test_reads_the_list_not_the_latest_endpoint(self):
         calls = []
 
         def fetch(url):
             calls.append(url)
-            return _release('v0.14-beta')
+            return [_release('v0.14-beta')]
 
         self.assertEqual(updater.latest_release(fetch)['tag_name'], 'v0.14-beta')
         self.assertEqual(len(calls), 1)
-        self.assertTrue(calls[0].endswith('/releases/latest'))
+        self.assertFalse(calls[0].endswith('/latest'))
 
-    def test_falls_back_to_the_list_when_latest_is_absent(self):
-        # The day someone ticks "prerelease", /latest 404s and every installed
-        # app would silently stop seeing updates without this fallback.
+    def test_highest_version_wins_over_list_order(self):
+        # GitHub has already ordered this repo's releases in a way nobody
+        # expected, so "first entry" is not "newest version".
         def fetch(url):
-            if url.endswith('/latest'):
-                raise updater.NotFound()
-            return [_release('v0.14-beta'), _release('v0.13-beta')]
+            return [_release('v0.9-beta'), _release('v0.14-beta'),
+                    _release('v0.13-beta')]
 
         self.assertEqual(updater.latest_release(fetch)['tag_name'], 'v0.14-beta')
 
-    def test_drafts_are_skipped_in_the_fallback(self):
+    def test_ten_beats_nine_here_too(self):
         def fetch(url):
-            if url.endswith('/latest'):
-                raise updater.NotFound()
+            return [_release('v0.9-beta'), _release('v0.10-beta')]
+
+        self.assertEqual(updater.latest_release(fetch)['tag_name'], 'v0.10-beta')
+
+    def test_drafts_are_skipped(self):
+        def fetch(url):
             return [_release('v0.15-beta', draft=True), _release('v0.14-beta')]
 
         self.assertEqual(updater.latest_release(fetch)['tag_name'], 'v0.14-beta')
 
-    def test_no_releases_at_all(self):
+    def test_prereleases_are_skipped(self):
+        # Ticking "prerelease" is a deliberate statement that a release is not
+        # for everyone yet. Honour it rather than shipping it to everyone.
         def fetch(url):
-            if url.endswith('/latest'):
-                raise updater.NotFound()
-            return []
+            return [_release('v0.15-beta', prerelease=True), _release('v0.14-beta')]
 
-        self.assertIsNone(updater.latest_release(fetch))
+        self.assertEqual(updater.latest_release(fetch)['tag_name'], 'v0.14-beta')
+
+    def test_unparseable_tags_are_skipped(self):
+        def fetch(url):
+            return [_release('nightly'), _release('v0.14-beta')]
+
+        self.assertEqual(updater.latest_release(fetch)['tag_name'], 'v0.14-beta')
+
+    def test_no_releases_at_all(self):
+        self.assertIsNone(updater.latest_release(lambda url: []))
+
+    def test_nothing_installable(self):
+        self.assertIsNone(updater.latest_release(
+            lambda url: [_release('v0.15-beta', draft=True)]))
 
 
 class CheckTests(unittest.TestCase):
 
     def test_newer_release_is_offered(self):
-        found = updater.check('v0.13-beta', lambda url: _release('v0.14-beta'))
+        found = updater.check('v0.13-beta', lambda url: [_release('v0.14-beta')])
         self.assertEqual(found.tag, 'v0.14-beta')
         self.assertEqual(found.zip_url,
                          'https://example.invalid/CEI-PDF-Signer-v0.14-beta-macOS.zip')
@@ -1627,16 +1662,16 @@ class CheckTests(unittest.TestCase):
 
     def test_same_version_offers_nothing(self):
         self.assertIsNone(
-            updater.check('v0.14-beta', lambda url: _release('v0.14-beta')))
+            updater.check('v0.14-beta', lambda url: [_release('v0.14-beta')]))
 
     def test_release_without_our_archive_is_ignored(self):
         # A release carrying only source tarballs is not something to install.
         release = _release('v0.14-beta', assets=('Source code.zip', 'SHA256SUMS.txt'))
-        self.assertIsNone(updater.check('v0.13-beta', lambda url: release))
+        self.assertIsNone(updater.check('v0.13-beta', lambda url: [release]))
 
     def test_release_without_checksums_is_ignored(self):
         release = _release('v0.14-beta', assets=('CEI-PDF-Signer-v0.14-beta-macOS.zip',))
-        self.assertIsNone(updater.check('v0.13-beta', lambda url: release))
+        self.assertIsNone(updater.check('v0.13-beta', lambda url: [release]))
 
     def test_network_failure_is_silent(self):
         # A signer that cannot reach GitHub is still a working signer.
@@ -1646,7 +1681,7 @@ class CheckTests(unittest.TestCase):
         self.assertIsNone(updater.check('v0.13-beta', fetch))
 
     def test_dev_build_never_updates(self):
-        self.assertIsNone(updater.check('dev', lambda url: _release('v0.14-beta')))
+        self.assertIsNone(updater.check('dev', lambda url: [_release('v0.14-beta')]))
 
 
 class BundleLocationTests(unittest.TestCase):
@@ -2020,6 +2055,15 @@ class UpdateStartTests(unittest.TestCase):
             self.assertEqual(self.client.post('/api/update/start').status_code, 200)
             self.assertEqual(self.client.post('/api/update/start').status_code, 409)
 
+    def test_a_failed_update_can_be_retried(self):
+        # A dropped connection does not mean the update went away, and the
+        # banner still offers it. Refusing the retry told the user there was
+        # no update while one was visibly on screen.
+        self._make_available()
+        app_module._set('failed', error='conexiune intrerupta')
+        with mock.patch.object(app_module, '_run_update', lambda: None):
+            self.assertEqual(self.client.post('/api/update/start').status_code, 200)
+
 
 class UpdateDownloadLinkTests(unittest.TestCase):
     """The fallback opener must not become an arbitrary-URL opener.
@@ -2210,14 +2254,72 @@ class MoveToApplicationsTests(unittest.TestCase):
         self.assertEqual(argv[-2], '/x/CEI PDF Signer.app',
                          'the original must be cleaned up, not left behind')
 
-    def test_a_translocated_original_is_left_alone(self):
-        # We cannot find the real original from a translocated path, so the
-        # cleanup argument must be empty rather than a guess.
+    def test_a_translocated_app_is_copied_out_before_quitting(self):
+        """The helper runs after we are dead, and the source dies with us.
+
+        macOS tears down the randomized AppTranslocation mount when the
+        process exits. Handing the helper that path means handing it a path
+        that will not exist when it looks: ditto fails, there is no previous
+        install to roll back to, and the user is left with no app at all -
+        in exactly the case this prompt exists for.
+        """
         dest = pathlib.Path('/Applications/CEI PDF Signer.app')
         self.window.create_confirmation_dialog.return_value = True
-        with mock.patch.object(self.main, '_quit_and_relaunch') as relaunch:
+        with mock.patch.object(self.main.tempfile, 'mkdtemp',
+                               return_value='/tmp/cei-move-x'), \
+             mock.patch.object(self.main.subprocess, 'run') as run, \
+             mock.patch.object(self.main, '_quit_and_relaunch') as relaunch:
             self.assertTrue(self._run(self._patches(dest, translocated=True)))
-        self.assertEqual(relaunch.call_args[0][0][-2], '')
+
+        copied = run.call_args[0][0]
+        self.assertEqual(copied[0], 'ditto')
+        self.assertEqual(copied[1], '/x/CEI PDF Signer.app')
+        self.assertEqual(copied[2], '/tmp/cei-move-x/CEI PDF Signer.app')
+
+        argv = relaunch.call_args[0][0]
+        source, cleanup = argv[-4], argv[-2]
+        self.assertEqual(source, '/tmp/cei-move-x/CEI PDF Signer.app',
+                         'the helper must copy from the staged copy')
+        self.assertNotIn('AppTranslocation', source)
+        self.assertEqual(cleanup, '/tmp/cei-move-x',
+                         'the staging dir is what gets cleaned up')
+
+    def test_a_normal_move_is_not_staged(self):
+        # An ordinary directory outlives us, and passing it as its own
+        # cleanup path is what makes this a move rather than a copy.
+        dest = pathlib.Path('/Applications/CEI PDF Signer.app')
+        self.window.create_confirmation_dialog.return_value = True
+        with mock.patch.object(self.main.subprocess, 'run') as run, \
+             mock.patch.object(self.main, '_quit_and_relaunch') as relaunch:
+            self.assertTrue(self._run(self._patches(dest)))
+        run.assert_not_called()
+        argv = relaunch.call_args[0][0]
+        self.assertEqual(argv[-4], '/x/CEI PDF Signer.app')
+        self.assertEqual(argv[-2], '/x/CEI PDF Signer.app')
+
+    def test_an_unwritable_prefs_file_cannot_stop_the_app_starting(self):
+        # This is the first thing start_app does. An exception escaping it
+        # means Flask never starts and the user stares at the loading screen
+        # forever, with no error anywhere.
+        dest = pathlib.Path('/Applications/CEI PDF Signer.app')
+        self.window.create_confirmation_dialog.return_value = False
+        with mock.patch.object(self.main.prefs, 'set',
+                               side_effect=OSError('read-only file system')):
+            self.assertFalse(self._run(self._patches(dest)))
+
+    def test_a_failing_dialog_cannot_stop_the_app_starting(self):
+        dest = pathlib.Path('/Applications/CEI PDF Signer.app')
+        self.window.create_confirmation_dialog.side_effect = RuntimeError('boom')
+        self.assertFalse(self._run(self._patches(dest)))
+
+    def test_a_failing_stage_copy_cannot_stop_the_app_starting(self):
+        dest = pathlib.Path('/Applications/CEI PDF Signer.app')
+        self.window.create_confirmation_dialog.return_value = True
+        with mock.patch.object(self.main.subprocess, 'run',
+                               side_effect=OSError('no space left')), \
+             mock.patch.object(self.main, '_quit_and_relaunch') as relaunch:
+            self.assertFalse(self._run(self._patches(dest, translocated=True)))
+        relaunch.assert_not_called()
 
 
 class HiddenImportsTests(unittest.TestCase):

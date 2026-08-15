@@ -6,9 +6,12 @@ set -e
 
 cd "$(dirname "$0")"
 
-# build.sh calculeaza si exporta APP_VERSION; il folosim pe acelasi, ca numele
-# arhivei si versiunea din Info.plist sa nu poata devia una de alta.
-VERSION="${APP_VERSION:-$(git describe --tags --abbrev=0 2>/dev/null || echo dev)}"
+# Se calculeaza aici si se EXPORTA, ca build.sh sa nu-si calculeze propria
+# versiune. Fara export, numele arhivei venea de aici si versiunea din
+# Info.plist dintr-un `git describe` separat - doua surse care astazi dau
+# acelasi raspuns, dar nimic nu le obliga sa o faca.
+export APP_VERSION="${APP_VERSION:-$(git describe --tags --abbrev=0 2>/dev/null || echo dev)}"
+VERSION="$APP_VERSION"
 
 echo "=== CEI PDF Signer - Release Build ==="
 echo "Versiune: $VERSION"

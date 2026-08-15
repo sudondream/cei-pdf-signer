@@ -8,6 +8,7 @@ import sys
 import os
 import signal
 import subprocess
+import tempfile
 import threading
 import socket
 import time
@@ -180,17 +181,57 @@ MOVE_MESSAGE = (
 )
 
 
+def _staged_move_source(bundle):
+    """(source, cleanup) for moving `bundle` into /Applications.
+
+    A translocated app is copied to a temp directory *before* we quit. macOS
+    tears down the randomized AppTranslocation mount when the process exits,
+    and the helper runs only once we are dead - which is the whole point of
+    it. Handing it the translocated path means handing it a path that will
+    not exist by the time it looks: ditto fails, there is no previous install
+    to roll back to, and the user is left with no application at all. That is
+    the exact case this prompt exists to serve, so it is the one case that
+    must not break.
+
+    A normal bundle needs no staging. It is an ordinary directory that
+    outlives us, and passing it as its own cleanup path is what makes this a
+    move rather than a copy.
+    """
+    if not updater.is_translocated(bundle):
+        return str(bundle), str(bundle)
+
+    staging = tempfile.mkdtemp(prefix='cei-move-')
+    staged = os.path.join(staging, bundle.name)
+    subprocess.run(['ditto', str(bundle), staged], check=True)
+    return staged, staging
+
+
 def offer_move_to_applications(window):
     """Offer to install the app in /Applications. True if we are quitting.
+
+    Never raises. This is the first thing that runs at startup, so anything
+    escaping it - an unwritable preferences file, a full disk, a native dialog
+    that misbehaves - would stop Flask from ever starting and leave the user
+    staring at the loading screen with no error. Moving the app is a
+    convenience; the app starting is not.
+    """
+    try:
+        return _offer_move_to_applications(window)
+    except Exception:
+        return False
+
+
+def _offer_move_to_applications(window):
+    """The actual offer.
 
     Runs before Flask starts, since there is no sense booting a server we are
     about to kill.
 
-    A translocated app cannot be deleted afterwards - macOS runs it from a
-    randomized read-only path that does not say where the original came from -
-    so that case copies and leaves the original behind. Recovering the true
-    path needs SecTranslocateCreateOriginalPathForURL from Security.framework,
-    which is a lot of ctypes to buy tidiness.
+    The original is deleted after a normal move but left alone after a
+    translocated one: macOS runs a translocated app from a path that does not
+    say where the download came from, and recovering it needs
+    SecTranslocateCreateOriginalPathForURL from Security.framework - a lot of
+    ctypes to buy tidiness.
     """
     bundle = updater.bundle_path()
     destination = updater.move_destination(bundle)
@@ -201,9 +242,9 @@ def offer_move_to_applications(window):
         prefs.set('move_declined', True)
         return False
 
-    cleanup = '' if updater.is_translocated(bundle) else str(bundle)
+    source, cleanup = _staged_move_source(bundle)
     _quit_and_relaunch(
-        updater.relaunch_command(os.getpid(), str(bundle), str(destination), cleanup),
+        updater.relaunch_command(os.getpid(), source, str(destination), cleanup),
         window=window)
     return True
 
@@ -232,6 +273,7 @@ def main():
         """Start Flask and navigate to it once ready"""
         # Inainte de orice: daca aplicatia nu e in Applications, oferim mutarea.
         # Nu are rost sa pornim un server pe care urmeaza sa-l oprim.
+        # offer_move_to_applications nu arunca niciodata - vezi comentariul ei.
         if offer_move_to_applications(window):
             return
 

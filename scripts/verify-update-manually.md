@@ -1,5 +1,18 @@
 # Verificarea manuala a actualizarii automate
 
+## Regula de numerotare (citeste asta inainte de un hotfix)
+
+Compararea versiunilor foloseste doar partea numerica a tag-ului. Sufixul este
+ignorat, deci **`v0.14-beta2` NU este vazut ca mai nou decat `v0.14-beta`** si un
+hotfix numerotat asa nu ajunge la nimeni.
+
+Pentru o remediere rapida se creste numarul de patch: `v0.14.1-beta`, care se
+citeste ca `(0, 14, 1)` si se distribuie normal. Exista un test care fixeaza
+aceasta limitare (`test_a_suffixed_hotfix_is_NOT_seen_as_newer`).
+
+De asemenea: un release marcat **prerelease** sau **draft** pe GitHub este ignorat
+intentionat de mecanismul de actualizare.
+
 Testele automate acopera fiecare bucata, dar nu si intregul: o aplicatie
 semnata real care se inlocuieste in /Applications si se redeschide. Se face o
 data inainte de fiecare release care atinge `updater.py`, `prefs.py` sau
