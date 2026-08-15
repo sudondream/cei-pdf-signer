@@ -7,6 +7,7 @@ Wraps the Flask web app in a native macOS window using PyWebView
 import sys
 import os
 import signal
+import subprocess
 import threading
 import socket
 import time
@@ -21,7 +22,8 @@ if getattr(sys, 'frozen', False):
         sys.path.insert(0, resources_dir)
 
 import webview
-from app import app, driver_busy, wait_for_driver
+from app import (app, driver_busy, wait_for_driver, set_relaunch_handler,
+                 start_update_check)
 
 
 # Loading screen HTML - shown immediately while Flask starts
@@ -144,6 +146,30 @@ def _on_signal():
     os._exit(0)
 
 
+def _quit_and_relaunch(argv, window=None):
+    """Spawn the installer helper, then quit the same way a close would.
+
+    The order is the point. wait_for_driver() runs first for exactly the reason
+    it runs on a normal close: dying inside a PKCS#11 call strands the Idemia
+    driver for every process on the machine until the Mac is restarted. An
+    update that saves the user a download and costs them a reboot is not a
+    saving.
+
+    start_new_session so the helper survives us - it exists to act after we are
+    gone. os._exit for the same reason the signal handler uses it: SystemExit
+    cannot unwind a main thread parked in Cocoa's event loop.
+    """
+    wait_for_driver()
+    subprocess.Popen(argv, start_new_session=True,
+                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    if window is not None:
+        try:
+            window.destroy()
+        except Exception:
+            pass  # cosmetic; the process is about to end anyway
+    os._exit(0)
+
+
 def main():
     # Must happen before any other thread starts, so they inherit the mask.
     signal.pthread_sigmask(signal.SIG_BLOCK, TERMINATING_SIGNALS)
@@ -174,6 +200,10 @@ def main():
         if wait_for_server(port):
             # Navigate to the Flask app
             window.load_url(f'http://127.0.0.1:{port}')
+            # Verificarea actualizarilor porneste dupa ce interfata s-a
+            # incarcat, ca sa nu concureze cu detectia cardului la pornire.
+            time.sleep(2)
+            start_update_check()
         else:
             # Show error if server failed
             window.load_html('''
@@ -206,6 +236,10 @@ def main():
         return False   # cancel this close; finish() closes for real
 
     window.events.closing += on_closing
+
+    # app.py descarca si verifica, dar nu are voie sa opreasca procesul. Aici
+    # este singurul loc care stie sa astepte driverul de card inainte sa moara.
+    set_relaunch_handler(lambda argv: _quit_and_relaunch(argv, window=window))
 
     # Start the GUI - the func runs in a separate thread
     webview.start(

@@ -2053,5 +2053,29 @@ class UpdateDownloadLinkTests(unittest.TestCase):
         run.assert_not_called()
 
 
+class RelaunchWiringTests(unittest.TestCase):
+    """The quit path must drain the card driver before spawning anything."""
+
+    def test_helper_is_detached_and_the_driver_is_drained_first(self):
+        import main as main_module
+        order = []
+        window = mock.Mock()
+        window.destroy.side_effect = lambda: order.append('destroy')
+
+        with mock.patch.object(main_module, 'wait_for_driver',
+                               side_effect=lambda: order.append('drain')), \
+             mock.patch.object(main_module.subprocess, 'Popen',
+                               side_effect=lambda *a, **k: order.append('spawn')) as popen, \
+             mock.patch.object(main_module.os, '_exit',
+                               side_effect=lambda code: order.append('exit')):
+            main_module._quit_and_relaunch(['/bin/sh', '-c', 'true'], window=window)
+
+        self.assertEqual(order[0], 'drain',
+                         'spawning before the driver drains risks the wedge')
+        self.assertIn('spawn', order)
+        self.assertTrue(popen.call_args[1]['start_new_session'],
+                        'the helper must outlive this process')
+
+
 if __name__ == '__main__':
     unittest.main(verbosity=2)
