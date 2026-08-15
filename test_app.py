@@ -2161,5 +2161,81 @@ class PrefsTests(unittest.TestCase):
             self.assertTrue(os.path.exists(nested))
 
 
+class MoveToApplicationsTests(unittest.TestCase):
+
+    def setUp(self):
+        import main as main_module
+        self.main = main_module
+        self.window = mock.Mock()
+
+    def _patches(self, destination, declined=False, translocated=False):
+        return [
+            mock.patch.object(self.main.updater, 'bundle_path',
+                              return_value=pathlib.Path('/x/CEI PDF Signer.app')),
+            mock.patch.object(self.main.updater, 'move_destination',
+                              return_value=destination),
+            mock.patch.object(self.main.updater, 'is_translocated',
+                              return_value=translocated),
+            mock.patch.object(self.main.prefs, 'get', return_value=declined),
+        ]
+
+    def _run(self, patches):
+        for patch in patches:
+            patch.start()
+            self.addCleanup(patch.stop)
+        return self.main.offer_move_to_applications(self.window)
+
+    def test_no_prompt_when_there_is_nowhere_to_move(self):
+        self.assertFalse(self._run(self._patches(None)))
+        self.window.create_confirmation_dialog.assert_not_called()
+
+    def test_no_prompt_after_a_previous_refusal(self):
+        dest = pathlib.Path('/Applications/CEI PDF Signer.app')
+        self.assertFalse(self._run(self._patches(dest, declined=True)))
+        self.window.create_confirmation_dialog.assert_not_called()
+
+    def test_refusing_is_remembered(self):
+        dest = pathlib.Path('/Applications/CEI PDF Signer.app')
+        self.window.create_confirmation_dialog.return_value = False
+        with mock.patch.object(self.main.prefs, 'set') as remember:
+            self.assertFalse(self._run(self._patches(dest)))
+        remember.assert_called_once_with('move_declined', True)
+
+    def test_accepting_moves_and_deletes_the_original(self):
+        dest = pathlib.Path('/Applications/CEI PDF Signer.app')
+        self.window.create_confirmation_dialog.return_value = True
+        with mock.patch.object(self.main, '_quit_and_relaunch') as relaunch:
+            self.assertTrue(self._run(self._patches(dest)))
+        argv = relaunch.call_args[0][0]
+        self.assertEqual(argv[-2], '/x/CEI PDF Signer.app',
+                         'the original must be cleaned up, not left behind')
+
+    def test_a_translocated_original_is_left_alone(self):
+        # We cannot find the real original from a translocated path, so the
+        # cleanup argument must be empty rather than a guess.
+        dest = pathlib.Path('/Applications/CEI PDF Signer.app')
+        self.window.create_confirmation_dialog.return_value = True
+        with mock.patch.object(self.main, '_quit_and_relaunch') as relaunch:
+            self.assertTrue(self._run(self._patches(dest, translocated=True)))
+        self.assertEqual(relaunch.call_args[0][0][-2], '')
+
+
+class HiddenImportsTests(unittest.TestCase):
+    """PyInstaller assembles the bundle from hiddenimports.
+
+    A module reached only at runtime can go missing from the build without
+    anything complaining until a user opens the app - which is why 'app' and
+    'pcsc' are already listed there.
+    """
+
+    def test_runtime_only_modules_are_declared(self):
+        here = os.path.dirname(os.path.abspath(__file__))
+        with open(os.path.join(here, 'CEIPDFSigner.spec')) as fh:
+            spec = fh.read()
+        for module in ('app', 'pcsc', 'updater', 'prefs'):
+            self.assertIn("'%s'," % module, spec,
+                          "%s is not in hiddenimports" % module)
+
+
 if __name__ == '__main__':
     unittest.main(verbosity=2)

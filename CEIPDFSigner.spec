@@ -50,6 +50,11 @@ a = Analysis(
         # this bundle is assembled from hidden imports, and a module that only
         # gets reached at runtime is a module that can silently go missing.
         'pcsc',
+        # Din acelasi motiv ca 'app' si 'pcsc': module la care se ajunge doar
+        # in timpul rularii, deci module care pot lipsi din bundle fara ca
+        # nimic sa se planga pana cand utilizatorul deschide aplicatia.
+        'updater',
+        'prefs',
         'flask',
         'flask_cors',
         'werkzeug',

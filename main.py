@@ -22,6 +22,8 @@ if getattr(sys, 'frozen', False):
         sys.path.insert(0, resources_dir)
 
 import webview
+import prefs
+import updater
 from app import (app, driver_busy, wait_for_driver, set_relaunch_handler,
                  start_update_check)
 
@@ -170,6 +172,42 @@ def _quit_and_relaunch(argv, window=None):
     os._exit(0)
 
 
+MOVE_TITLE = 'Muta in Applications'
+MOVE_MESSAGE = (
+    'CEI PDF Signer nu este in folderul Applications.\n\n'
+    'Il mutam acolo si repornim aplicatia? Actualizarile automate '
+    'functioneaza doar din Applications.'
+)
+
+
+def offer_move_to_applications(window):
+    """Offer to install the app in /Applications. True if we are quitting.
+
+    Runs before Flask starts, since there is no sense booting a server we are
+    about to kill.
+
+    A translocated app cannot be deleted afterwards - macOS runs it from a
+    randomized read-only path that does not say where the original came from -
+    so that case copies and leaves the original behind. Recovering the true
+    path needs SecTranslocateCreateOriginalPathForURL from Security.framework,
+    which is a lot of ctypes to buy tidiness.
+    """
+    bundle = updater.bundle_path()
+    destination = updater.move_destination(bundle)
+    if destination is None or prefs.get('move_declined', False):
+        return False
+
+    if not window.create_confirmation_dialog(MOVE_TITLE, MOVE_MESSAGE):
+        prefs.set('move_declined', True)
+        return False
+
+    cleanup = '' if updater.is_translocated(bundle) else str(bundle)
+    _quit_and_relaunch(
+        updater.relaunch_command(os.getpid(), str(bundle), str(destination), cleanup),
+        window=window)
+    return True
+
+
 def main():
     # Must happen before any other thread starts, so they inherit the mask.
     signal.pthread_sigmask(signal.SIG_BLOCK, TERMINATING_SIGNALS)
@@ -192,6 +230,11 @@ def main():
 
     def start_app():
         """Start Flask and navigate to it once ready"""
+        # Inainte de orice: daca aplicatia nu e in Applications, oferim mutarea.
+        # Nu are rost sa pornim un server pe care urmeaza sa-l oprim.
+        if offer_move_to_applications(window):
+            return
+
         # Start Flask server in background thread
         server_thread = threading.Thread(target=start_server, args=(port,), daemon=True)
         server_thread.start()
