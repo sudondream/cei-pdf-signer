@@ -20,6 +20,15 @@ block_cipher = None
 SIGN_IDENTITY = os.environ.get('SIGN_IDENTITY') or None
 ENTITLEMENTS = os.path.join(os.getcwd(), 'entitlements.plist') if SIGN_IDENTITY else None
 
+# Versiunea vine din tag-ul git, prin build.sh. Fara ea, fiecare build spunea
+# ca este 1.0.0 si aplicatia nu avea cu ce sa se compare la verificarea
+# actualizarilor. numeric_version() se importa din updater.py ca sa nu existe
+# doua definitii care pot devia una de alta.
+sys.path.insert(0, os.getcwd())
+from updater import numeric_version
+
+APP_VERSION = os.environ.get('APP_VERSION') or 'dev'
+
 # Get the path to site-packages
 import site
 site_packages = site.getsitepackages()[0]
@@ -41,6 +50,11 @@ a = Analysis(
         # this bundle is assembled from hidden imports, and a module that only
         # gets reached at runtime is a module that can silently go missing.
         'pcsc',
+        # Din acelasi motiv ca 'app' si 'pcsc': module la care se ajunge doar
+        # in timpul rularii, deci module care pot lipsi din bundle fara ca
+        # nimic sa se planga pana cand utilizatorul deschide aplicatia.
+        'updater',
+        'prefs',
         'flask',
         'flask_cors',
         'werkzeug',
@@ -152,8 +166,11 @@ app = BUNDLE(
     info_plist={
         'CFBundleName': 'CEI PDF Signer',
         'CFBundleDisplayName': 'CEI PDF Signer',
-        'CFBundleVersion': '1.0.0',
-        'CFBundleShortVersionString': '1.0.0',
+        'CFBundleVersion': numeric_version(APP_VERSION),
+        'CFBundleShortVersionString': numeric_version(APP_VERSION),
+        # Tag-ul neatins. Apple vrea numere in cheile de mai sus, noi vrem
+        # 'v0.13-beta' ca sa comparam cu ce raporteaza GitHub.
+        'CEIReleaseTag': APP_VERSION,
         'NSHighResolutionCapable': True,
         'NSRequiresAquaSystemAppearance': False,
         'LSMinimumSystemVersion': '10.13',

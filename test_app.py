@@ -11,9 +11,14 @@ These cover the two defects that produced "0 of 3 signed, empty zip":
 
 No smart card required.
 """
+import ast
 import ctypes
 import os
+import pathlib
+import plistlib
 import re
+import shutil
+import subprocess
 import tempfile
 import threading
 import time
@@ -23,6 +28,8 @@ from unittest import mock
 
 import app as app_module
 import pcsc
+import prefs
+import updater
 
 
 class FakeSlot:
@@ -1229,9 +1236,15 @@ class MainWiringTests(unittest.TestCase):
             return fh.read()
 
     def test_everything_main_imports_from_app_exists(self):
-        imported = re.findall(r'^from app import (.+)$', self._main_source(), re.MULTILINE)
-        self.assertTrue(imported, "main.py no longer imports from app")
-        names = [n.strip() for line in imported for n in line.split(',')]
+        # ast rather than a regex: the import list is long enough to be
+        # wrapped in parentheses across lines, which a line-based pattern
+        # reads as the name '(app'.
+        tree = ast.parse(self._main_source())
+        names = [alias.name
+                 for node in ast.walk(tree)
+                 if isinstance(node, ast.ImportFrom) and node.module == 'app'
+                 for alias in node.names]
+        self.assertTrue(names, "main.py no longer imports from app")
         for name in names:
             self.assertTrue(hasattr(app_module, name),
                             f"main.py imports {name!r} from app, which does not define it")
@@ -1485,6 +1498,845 @@ class NoOpenscToolTests(unittest.TestCase):
         self.assertIsNotNone(warning_map, "PKCS11_WARNING_TEXT not found")
         self.assertNotIn('pkcs11_missing', warning_map.group(1),
                          "a build defect must not be presented as a setting to change")
+
+
+class VersionParsingTests(unittest.TestCase):
+    """Tags are compared as numbers. As strings, v0.9 outranks v0.10."""
+
+    def test_beta_suffix_is_ignored(self):
+        self.assertEqual(updater.parse_version('v0.13-beta'), (0, 13, 0))
+
+    def test_leading_v_is_optional(self):
+        self.assertEqual(updater.parse_version('0.13.2'), (0, 13, 2))
+
+    def test_garbage_does_not_parse(self):
+        for tag in ('dev', '', 'beta', 'v', None):
+            self.assertIsNone(updater.parse_version(tag), tag)
+
+    def test_ten_is_newer_than_nine(self):
+        self.assertTrue(updater.is_newer('v0.10-beta', 'v0.9-beta'))
+        self.assertFalse(updater.is_newer('v0.9-beta', 'v0.10-beta'))
+
+    def test_same_version_is_not_newer(self):
+        self.assertFalse(updater.is_newer('v0.13-beta', 'v0.13-beta'))
+
+    def test_unparseable_never_counts_as_an_update(self):
+        # A tag we cannot read must not trigger a download. Both directions.
+        self.assertFalse(updater.is_newer('banana', 'v0.13-beta'))
+        self.assertFalse(updater.is_newer('v0.99-beta', 'dev'))
+
+    def test_a_suffixed_hotfix_is_NOT_seen_as_newer(self):
+        """Known limitation, pinned so it cannot surprise anyone.
+
+        The comparator reads only the numeric part, so v0.14-beta2 and
+        v0.14-beta are equal and a suffix-only hotfix reaches nobody. The
+        release rule is therefore to bump the patch number - v0.14.1-beta,
+        which parses to (0, 14, 1) and does ship. See
+        scripts/verify-update-manually.md.
+        """
+        self.assertFalse(updater.is_newer('v0.14-beta2', 'v0.14-beta'))
+        self.assertTrue(updater.is_newer('v0.14.1-beta', 'v0.14-beta'))
+
+    def test_numeric_version_is_dotted_integers_for_apple(self):
+        # CFBundleVersion must be dotted integers or notarization complains.
+        self.assertEqual(updater.numeric_version('v0.13-beta'), '0.13.0')
+        self.assertEqual(updater.numeric_version('dev'), '0.0.0')
+
+
+class CurrentVersionTests(unittest.TestCase):
+
+    def test_unfrozen_reports_dev(self):
+        # Run from source there is no Info.plist, so the updater switches off.
+        with mock.patch.object(updater.sys, 'frozen', False, create=True):
+            self.assertIsNone(updater.bundle_path())
+            self.assertEqual(updater.current_release_tag(), 'dev')
+
+    def test_tag_is_read_from_the_bundle_plist(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            contents = os.path.join(tmp, 'X.app', 'Contents')
+            os.makedirs(os.path.join(contents, 'MacOS'))
+            with open(os.path.join(contents, 'Info.plist'), 'wb') as fh:
+                plistlib.dump({'CEIReleaseTag': 'v0.13-beta'}, fh)
+            exe = os.path.join(contents, 'MacOS', 'X')
+            with mock.patch.object(updater.sys, 'frozen', True, create=True), \
+                 mock.patch.object(updater.sys, 'executable', exe):
+                self.assertEqual(updater.current_release_tag(), 'v0.13-beta')
+
+    def test_missing_key_reports_dev(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            contents = os.path.join(tmp, 'X.app', 'Contents')
+            os.makedirs(os.path.join(contents, 'MacOS'))
+            with open(os.path.join(contents, 'Info.plist'), 'wb') as fh:
+                plistlib.dump({'CFBundleName': 'X'}, fh)
+            exe = os.path.join(contents, 'MacOS', 'X')
+            with mock.patch.object(updater.sys, 'frozen', True, create=True), \
+                 mock.patch.object(updater.sys, 'executable', exe):
+                self.assertEqual(updater.current_release_tag(), 'dev')
+
+
+def _release(tag, assets=('CEI-PDF-Signer-v0.14-beta-macOS.zip', 'SHA256SUMS.txt'),
+             draft=False, prerelease=False):
+    return {
+        'tag_name': tag,
+        'draft': draft,
+        'prerelease': prerelease,
+        'html_url': 'https://github.com/sudondream/cei-pdf-signer/releases/' + tag,
+        'assets': [{'name': name, 'size': 29360128,
+                    'browser_download_url': 'https://example.invalid/' + name}
+                   for name in assets],
+    }
+
+
+class LatestReleaseTests(unittest.TestCase):
+    """Reads the whole list, because neither shortcut is trustworthy.
+
+    /releases/latest returns the newest NON-prerelease release and 404s only
+    when every release is a prerelease - so it cannot be used to notice that a
+    prerelease exists. And /releases arrives ordered by creation date, which
+    this repository has already seen GitHub get wrong.
+    """
+
+    def test_reads_the_list_not_the_latest_endpoint(self):
+        calls = []
+
+        def fetch(url):
+            calls.append(url)
+            return [_release('v0.14-beta')]
+
+        self.assertEqual(updater.latest_release(fetch)['tag_name'], 'v0.14-beta')
+        self.assertEqual(len(calls), 1)
+        self.assertFalse(calls[0].endswith('/latest'))
+
+    def test_highest_version_wins_over_list_order(self):
+        # GitHub has already ordered this repo's releases in a way nobody
+        # expected, so "first entry" is not "newest version".
+        def fetch(url):
+            return [_release('v0.9-beta'), _release('v0.14-beta'),
+                    _release('v0.13-beta')]
+
+        self.assertEqual(updater.latest_release(fetch)['tag_name'], 'v0.14-beta')
+
+    def test_ten_beats_nine_here_too(self):
+        def fetch(url):
+            return [_release('v0.9-beta'), _release('v0.10-beta')]
+
+        self.assertEqual(updater.latest_release(fetch)['tag_name'], 'v0.10-beta')
+
+    def test_drafts_are_skipped(self):
+        def fetch(url):
+            return [_release('v0.15-beta', draft=True), _release('v0.14-beta')]
+
+        self.assertEqual(updater.latest_release(fetch)['tag_name'], 'v0.14-beta')
+
+    def test_prereleases_are_skipped(self):
+        # Ticking "prerelease" is a deliberate statement that a release is not
+        # for everyone yet. Honour it rather than shipping it to everyone.
+        def fetch(url):
+            return [_release('v0.15-beta', prerelease=True), _release('v0.14-beta')]
+
+        self.assertEqual(updater.latest_release(fetch)['tag_name'], 'v0.14-beta')
+
+    def test_unparseable_tags_are_skipped(self):
+        def fetch(url):
+            return [_release('nightly'), _release('v0.14-beta')]
+
+        self.assertEqual(updater.latest_release(fetch)['tag_name'], 'v0.14-beta')
+
+    def test_no_releases_at_all(self):
+        self.assertIsNone(updater.latest_release(lambda url: []))
+
+    def test_nothing_installable(self):
+        self.assertIsNone(updater.latest_release(
+            lambda url: [_release('v0.15-beta', draft=True)]))
+
+
+class CheckTests(unittest.TestCase):
+
+    def test_newer_release_is_offered(self):
+        found = updater.check('v0.13-beta', lambda url: [_release('v0.14-beta')])
+        self.assertEqual(found.tag, 'v0.14-beta')
+        self.assertEqual(found.zip_url,
+                         'https://example.invalid/CEI-PDF-Signer-v0.14-beta-macOS.zip')
+        self.assertEqual(found.sums_url, 'https://example.invalid/SHA256SUMS.txt')
+        self.assertEqual(found.zip_size, 29360128)
+
+    def test_same_version_offers_nothing(self):
+        self.assertIsNone(
+            updater.check('v0.14-beta', lambda url: [_release('v0.14-beta')]))
+
+    def test_release_without_our_archive_is_ignored(self):
+        # A release carrying only source tarballs is not something to install.
+        release = _release('v0.14-beta', assets=('Source code.zip', 'SHA256SUMS.txt'))
+        self.assertIsNone(updater.check('v0.13-beta', lambda url: [release]))
+
+    def test_release_without_checksums_is_ignored(self):
+        release = _release('v0.14-beta', assets=('CEI-PDF-Signer-v0.14-beta-macOS.zip',))
+        self.assertIsNone(updater.check('v0.13-beta', lambda url: [release]))
+
+    def test_network_failure_is_silent(self):
+        # A signer that cannot reach GitHub is still a working signer.
+        def fetch(url):
+            raise OSError('no route to host')
+
+        self.assertIsNone(updater.check('v0.13-beta', fetch))
+
+    def test_dev_build_never_updates(self):
+        self.assertIsNone(updater.check('dev', lambda url: [_release('v0.14-beta')]))
+
+
+class BundleLocationTests(unittest.TestCase):
+
+    def test_translocation_is_detected(self):
+        # An app opened straight from Downloads runs read-only from a random
+        # path under here, and cannot replace itself.
+        path = pathlib.Path('/private/var/folders/ab/xy/T/AppTranslocation/'
+                            '1234-5678/d/CEI PDF Signer.app')
+        self.assertTrue(updater.is_translocated(path))
+        self.assertFalse(updater.is_installable(path))
+
+    def test_normal_path_is_not_translocated(self):
+        self.assertFalse(
+            updater.is_translocated(pathlib.Path('/Applications/CEI PDF Signer.app')))
+
+    def test_writable_location_is_installable(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            bundle = pathlib.Path(tmp) / 'CEI PDF Signer.app'
+            bundle.mkdir()
+            self.assertTrue(updater.is_installable(bundle))
+
+    def test_read_only_parent_is_not_installable(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            parent = pathlib.Path(tmp) / 'ro'
+            parent.mkdir()
+            bundle = parent / 'CEI PDF Signer.app'
+            bundle.mkdir()
+            os.chmod(parent, 0o500)
+            try:
+                self.assertFalse(updater.is_installable(bundle))
+            finally:
+                os.chmod(parent, 0o700)   # or TemporaryDirectory cannot clean up
+
+
+class MoveDestinationTests(unittest.TestCase):
+    """Each of these must suppress the move prompt on its own."""
+
+    def test_offers_applications_for_a_bundle_in_downloads(self):
+        with tempfile.TemporaryDirectory() as home:
+            bundle = pathlib.Path(home) / 'Downloads' / 'CEI PDF Signer.app'
+            with mock.patch.object(updater, 'APPLICATIONS',
+                                   pathlib.Path(home) / 'Applications'):
+                (pathlib.Path(home) / 'Applications').mkdir()
+                self.assertEqual(
+                    updater.move_destination(bundle, home=home),
+                    pathlib.Path(home) / 'Applications' / 'CEI PDF Signer.app')
+
+    def test_already_in_applications_offers_nothing(self):
+        with tempfile.TemporaryDirectory() as home:
+            apps = pathlib.Path(home) / 'Applications'
+            apps.mkdir()
+            with mock.patch.object(updater, 'APPLICATIONS', apps):
+                self.assertIsNone(
+                    updater.move_destination(apps / 'CEI PDF Signer.app', home=home))
+
+    def test_already_in_home_applications_offers_nothing(self):
+        with tempfile.TemporaryDirectory() as home:
+            user_apps = pathlib.Path(home) / 'Applications'
+            user_apps.mkdir()
+            with mock.patch.object(updater, 'APPLICATIONS', pathlib.Path('/Applications')):
+                self.assertIsNone(
+                    updater.move_destination(user_apps / 'CEI PDF Signer.app',
+                                             home=home))
+
+    def test_unwritable_applications_offers_nothing(self):
+        with tempfile.TemporaryDirectory() as home:
+            apps = pathlib.Path(home) / 'Applications'
+            apps.mkdir()
+            os.chmod(apps, 0o500)
+            try:
+                with mock.patch.object(updater, 'APPLICATIONS', apps):
+                    self.assertIsNone(updater.move_destination(
+                        pathlib.Path(home) / 'Downloads' / 'CEI PDF Signer.app',
+                        home=home))
+            finally:
+                os.chmod(apps, 0o700)
+
+    def test_unfrozen_offers_nothing(self):
+        self.assertIsNone(updater.move_destination(None))
+
+
+class RelaunchHelperTests(unittest.TestCase):
+    """The helper runs after the app is dead, so it is run for real here.
+
+    'open' is shadowed by a stub on PATH: the tests must not launch anything.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+        self.bin = os.path.join(self.tmp, 'bin')
+        os.makedirs(self.bin)
+        self.opened = os.path.join(self.tmp, 'opened.txt')
+        with open(os.path.join(self.bin, 'open'), 'w') as fh:
+            fh.write('#!/bin/sh\necho "$1" >> %s\n' % self.opened)
+        os.chmod(os.path.join(self.bin, 'open'), 0o755)
+
+    def _bundle(self, name, marker, subdir=''):
+        path = os.path.join(self.tmp, subdir, name)
+        os.makedirs(os.path.join(path, 'Contents'))
+        with open(os.path.join(path, 'Contents', 'marker'), 'w') as fh:
+            fh.write(marker)
+        return path
+
+    def _reaped(self, argv):
+        """Run argv, reaping it the moment it exits.
+
+        An unreaped child stays a zombie, and `kill -0` succeeds on a zombie -
+        so the helper would wait out its full timeout instead of noticing the
+        exit. Production does not have this problem: the app is launched by
+        launchd, which reaps it promptly.
+        """
+        live = subprocess.Popen(argv)
+        threading.Thread(target=live.wait, daemon=True).start()
+        return live
+
+    def _marker(self, bundle):
+        with open(os.path.join(bundle, 'Contents', 'marker')) as fh:
+            return fh.read()
+
+    def _run(self, pid, src, dest, cleanup=''):
+        env = dict(os.environ, PATH=self.bin + os.pathsep + os.environ['PATH'])
+        return subprocess.run(
+            updater.relaunch_command(pid, src, dest, cleanup),
+            env=env, capture_output=True, text=True, timeout=60)
+
+    def _dead_pid(self):
+        """A pid that has already exited and been reaped."""
+        done = subprocess.Popen(['/bin/sh', '-c', 'exit 0'])
+        done.wait()
+        return done.pid
+
+    def test_moves_a_bundle_into_place_and_opens_it(self):
+        src = self._bundle('New.app', 'new')
+        dest = os.path.join(self.tmp, 'Dest.app')
+        self._run(self._dead_pid(), src, dest)
+        self.assertEqual(self._marker(dest), 'new')
+        with open(self.opened) as fh:
+            self.assertEqual(fh.read().strip(), dest)
+
+    def test_replaces_an_existing_bundle(self):
+        # The update case: the staged bundle sits in its own temp dir, and
+        # that whole dir is the cleanup path.
+        src = self._bundle('New.app', 'new', subdir='staging')
+        dest = self._bundle('Dest.app', 'old')
+        self._run(self._dead_pid(), src, dest, cleanup=os.path.dirname(src))
+        self.assertEqual(self._marker(dest), 'new')
+        self.assertFalse(os.path.exists(os.path.dirname(src)))
+
+    def test_cleanup_path_is_removed(self):
+        # The update passes its temp dir here; a normal move passes the
+        # original bundle, so the app does not end up installed twice.
+        src = self._bundle('New.app', 'new')
+        dest = os.path.join(self.tmp, 'Dest.app')
+        self._run(self._dead_pid(), src, dest, cleanup=src)
+        self.assertFalse(os.path.exists(src))
+        self.assertTrue(os.path.exists(dest))
+
+    def test_empty_cleanup_leaves_the_source_alone(self):
+        # The translocated move: the original is unreachable, so nothing is
+        # deleted. An empty argument must not turn into `rm -rf ''`.
+        src = self._bundle('New.app', 'new')
+        dest = os.path.join(self.tmp, 'Dest.app')
+        self._run(self._dead_pid(), src, dest, cleanup='')
+        self.assertTrue(os.path.exists(src))
+        self.assertTrue(os.path.exists(dest))
+
+    def test_failed_copy_restores_the_original(self):
+        # The rollback path, exercised rather than reasoned about. A missing
+        # source makes ditto fail after the destination has been moved aside.
+        dest = self._bundle('Dest.app', 'old')
+        missing = os.path.join(self.tmp, 'Gone.app')
+        self._run(self._dead_pid(), missing, dest)
+        self.assertEqual(self._marker(dest), 'old')
+        with open(self.opened) as fh:
+            self.assertEqual(fh.read().strip(), dest)
+
+    def test_no_leftover_aside_copy_on_success(self):
+        src = self._bundle('New.app', 'new')
+        dest = self._bundle('Dest.app', 'old')
+        self._run(self._dead_pid(), src, dest)
+        leftovers = [n for n in os.listdir(self.tmp) if '.old-' in n]
+        self.assertEqual(leftovers, [])
+
+    def test_it_waits_for_the_process_to_die(self):
+        live = self._reaped(['/bin/sh', '-c', 'sleep 1'])
+        src = self._bundle('New.app', 'new')
+        dest = os.path.join(self.tmp, 'Dest.app')
+        started = time.time()
+        self._run(live.pid, src, dest)
+        self.assertGreaterEqual(time.time() - started, 0.9)
+        self.assertEqual(self._marker(dest), 'new')
+
+    def test_a_process_that_never_dies_touches_nothing(self):
+        # Swapping a bundle under a live process is worse than not updating.
+        live = self._reaped(['/bin/sh', '-c', 'sleep 60'])
+        self.addCleanup(live.kill)
+        src = self._bundle('New.app', 'new')
+        dest = self._bundle('Dest.app', 'old')
+        with mock.patch.object(updater, 'WAIT_TICKS', 3):
+            self._run(live.pid, src, dest)
+        self.assertEqual(self._marker(dest), 'old')
+        self.assertFalse(os.path.exists(self.opened))
+
+
+class ChecksumTests(unittest.TestCase):
+
+    def test_sha256_of_a_file(self):
+        with tempfile.NamedTemporaryFile(delete=False) as fh:
+            fh.write(b'hello')
+        self.addCleanup(os.unlink, fh.name)
+        self.assertEqual(
+            updater.sha256(fh.name),
+            '2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824')
+
+    def test_expected_sha_picks_the_right_line(self):
+        sums = ('aaaa  OTHER.zip\n'
+                'bbbb  CEI-PDF-Signer-v0.14-beta-macOS.zip\n')
+        self.assertEqual(
+            updater.expected_sha(sums, 'CEI-PDF-Signer-v0.14-beta-macOS.zip'), 'bbbb')
+
+    def test_expected_sha_missing_entry(self):
+        self.assertIsNone(updater.expected_sha('aaaa  OTHER.zip\n', 'ours.zip'))
+
+
+class VerifyTests(unittest.TestCase):
+    """Every check must be able to fail the whole verification on its own."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+        self.zip = os.path.join(self.tmp, 'a.zip')
+        with open(self.zip, 'wb') as fh:
+            fh.write(b'hello')
+        self.sha = ('2cf24dba5fb0a30e26e83b2ac5b9e29e'
+                    '1b161e5c1fa7425e73043362938b9824')
+        self.bundle = os.path.join(self.tmp, 'X.app')
+        os.makedirs(self.bundle)
+
+    def _run(self, ok=True, team='ABCD1234', quarantined=False):
+        def fake(argv, **kwargs):
+            if argv[0] == 'codesign' and '-dv' in argv:
+                return subprocess.CompletedProcess(
+                    argv, 0, '', 'TeamIdentifier=%s\n' % team)
+            if argv[0] == 'xattr':
+                out = 'com.apple.quarantine\n' if quarantined else ''
+                return subprocess.CompletedProcess(argv, 0, out, '')
+            return subprocess.CompletedProcess(argv, 0 if ok else 1, '', 'nope')
+        return fake
+
+    def test_a_good_bundle_verifies(self):
+        updater.verify(self.zip, self.bundle, self.sha, 'ABCD1234',
+                       run=self._run())
+
+    def test_wrong_checksum_is_refused(self):
+        with self.assertRaises(updater.VerificationError):
+            updater.verify(self.zip, self.bundle, 'deadbeef', 'ABCD1234',
+                           run=self._run())
+
+    def test_a_different_team_is_refused(self):
+        # The check that actually matters: a bundle signed by someone else is
+        # not ours, whatever the release page says.
+        with self.assertRaises(updater.VerificationError):
+            updater.verify(self.zip, self.bundle, self.sha, 'ABCD1234',
+                           run=self._run(team='EVIL0000'))
+
+    def test_a_broken_signature_is_refused(self):
+        with self.assertRaises(updater.VerificationError):
+            updater.verify(self.zip, self.bundle, self.sha, 'ABCD1234',
+                           run=self._run(ok=False))
+
+    def test_quarantined_download_is_refused(self):
+        # We fetch with Python, so LaunchServices never stamps this. Finding it
+        # means something happened that we do not understand.
+        with self.assertRaises(updater.VerificationError):
+            updater.verify(self.zip, self.bundle, self.sha, 'ABCD1234',
+                           run=self._run(quarantined=True))
+
+    def test_an_adhoc_bundle_has_no_team(self):
+        # codesign says "TeamIdentifier=not set" for ad-hoc. Read naively that
+        # is the team "not", and two unsigned bundles would compare equal.
+        def fake(argv, **kwargs):
+            return subprocess.CompletedProcess(
+                argv, 0, '', 'TeamIdentifier=not set\n')
+
+        self.assertIsNone(updater.team_identifier(self.bundle, run=fake))
+
+    def test_an_unsigned_download_is_refused(self):
+        with self.assertRaises(updater.VerificationError):
+            updater.verify(self.zip, self.bundle, self.sha, None,
+                           run=self._run(team='not set'))
+
+    def test_checksum_is_checked_before_anything_expensive(self):
+        seen = []
+
+        def fake(argv, **kwargs):
+            seen.append(argv[0])
+            return subprocess.CompletedProcess(argv, 0, '', 'TeamIdentifier=X\n')
+
+        with self.assertRaises(updater.VerificationError):
+            updater.verify(self.zip, self.bundle, 'deadbeef', 'X', run=fake)
+        self.assertEqual(seen, [])
+
+
+class UpdateStatusTests(unittest.TestCase):
+
+    def setUp(self):
+        app_module.app.config['TESTING'] = True
+        self.client = app_module.app.test_client()
+        app_module.reset_update_state()
+
+    def test_idle_by_default(self):
+        body = self.client.get('/api/update/status').get_json()
+        self.assertEqual(body['stage'], 'idle')
+        self.assertIsNone(body['tag'])
+
+    def test_available_after_a_check_finds_one(self):
+        found = updater.Update('v0.14-beta', 'https://example.invalid/a.zip',
+                               10, 'https://example.invalid/SHA256SUMS.txt',
+                               'https://example.invalid/page')
+        with mock.patch.object(app_module.updater, 'check', return_value=found), \
+             mock.patch.object(app_module.updater, 'is_installable', return_value=True):
+            app_module.start_update_check().join(5)
+        body = self.client.get('/api/update/status').get_json()
+        self.assertEqual(body['stage'], 'available')
+        self.assertEqual(body['tag'], 'v0.14-beta')
+        self.assertTrue(body['installable'])
+
+    def test_a_failed_check_stays_idle(self):
+        # A signer that cannot reach GitHub is still a working signer.
+        with mock.patch.object(app_module.updater, 'check', return_value=None):
+            app_module.start_update_check().join(5)
+        self.assertEqual(
+            self.client.get('/api/update/status').get_json()['stage'], 'idle')
+
+
+class UpdateStartTests(unittest.TestCase):
+
+    def setUp(self):
+        app_module.app.config['TESTING'] = True
+        self.client = app_module.app.test_client()
+        app_module.reset_update_state()
+        self.found = updater.Update('v0.14-beta', 'https://example.invalid/a.zip',
+                                    10, 'https://example.invalid/SHA256SUMS.txt',
+                                    'https://example.invalid/page')
+
+    def _make_available(self):
+        with mock.patch.object(app_module.updater, 'check', return_value=self.found), \
+             mock.patch.object(app_module.updater, 'is_installable', return_value=True):
+            app_module.start_update_check().join(5)
+
+    def test_start_is_rejected_when_nothing_is_available(self):
+        self.assertEqual(self.client.post('/api/update/start').status_code, 409)
+
+    def test_start_is_rejected_while_the_card_driver_is_busy(self):
+        # Restarting mid-PKCS#11 is what wedges the driver until reboot.
+        self._make_available()
+        with mock.patch.object(app_module, 'driver_busy', return_value=True):
+            self.assertEqual(self.client.post('/api/update/start').status_code, 409)
+
+    def test_start_is_rejected_when_the_bundle_cannot_be_replaced(self):
+        with mock.patch.object(app_module.updater, 'check', return_value=self.found), \
+             mock.patch.object(app_module.updater, 'is_installable', return_value=False):
+            app_module.start_update_check().join(5)
+        self.assertEqual(self.client.post('/api/update/start').status_code, 409)
+
+    def test_start_is_rejected_twice(self):
+        self._make_available()
+        with mock.patch.object(app_module, '_run_update', lambda: None):
+            self.assertEqual(self.client.post('/api/update/start').status_code, 200)
+            self.assertEqual(self.client.post('/api/update/start').status_code, 409)
+
+    def test_a_failed_update_can_be_retried(self):
+        # A dropped connection does not mean the update went away, and the
+        # banner still offers it. Refusing the retry told the user there was
+        # no update while one was visibly on screen.
+        self._make_available()
+        app_module._set('failed', error='conexiune intrerupta')
+        with mock.patch.object(app_module, '_run_update', lambda: None):
+            self.assertEqual(self.client.post('/api/update/start').status_code, 200)
+
+
+class UpdateDownloadLinkTests(unittest.TestCase):
+    """The fallback opener must not become an arbitrary-URL opener.
+
+    /api/open-external is guarded by test_raw_url_cannot_be_injected; this
+    route takes no parameters at all, so the same property holds by shape.
+    """
+
+    def setUp(self):
+        app_module.app.config['TESTING'] = True
+        self.client = app_module.app.test_client()
+        app_module.reset_update_state()
+
+    def _found(self, page_url):
+        found = updater.Update('v0.14-beta', 'z', 10, 's', page_url)
+        with mock.patch.object(app_module.updater, 'check', return_value=found), \
+             mock.patch.object(app_module.updater, 'is_installable', return_value=False):
+            app_module.start_update_check().join(5)
+
+    def test_opens_the_stored_release_page(self):
+        url = 'https://github.com/sudondream/cei-pdf-signer/releases/v0.14-beta'
+        self._found(url)
+        with mock.patch.object(app_module.subprocess, 'run') as run:
+            resp = self.client.post('/api/update/open-download')
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(run.call_args[0][0], ['open', url])
+
+    def test_a_url_in_the_body_is_ignored(self):
+        self._found('https://real.example')
+        with mock.patch.object(app_module.subprocess, 'run') as run:
+            self.client.post('/api/update/open-download',
+                             json={'url': 'https://evil.example.com'})
+        self.assertEqual(run.call_args[0][0], ['open', 'https://real.example'])
+
+    def test_nothing_to_open_is_rejected(self):
+        with mock.patch.object(app_module.subprocess, 'run') as run:
+            resp = self.client.post('/api/update/open-download')
+        self.assertEqual(resp.status_code, 400)
+        run.assert_not_called()
+
+
+class RelaunchWiringTests(unittest.TestCase):
+    """The quit path must drain the card driver before spawning anything."""
+
+    def test_helper_is_detached_and_the_driver_is_drained_first(self):
+        import main as main_module
+        order = []
+        window = mock.Mock()
+        window.destroy.side_effect = lambda: order.append('destroy')
+
+        with mock.patch.object(main_module, 'wait_for_driver',
+                               side_effect=lambda: order.append('drain')), \
+             mock.patch.object(main_module.subprocess, 'Popen',
+                               side_effect=lambda *a, **k: order.append('spawn')) as popen, \
+             mock.patch.object(main_module.os, '_exit',
+                               side_effect=lambda code: order.append('exit')):
+            main_module._quit_and_relaunch(['/bin/sh', '-c', 'true'], window=window)
+
+        self.assertEqual(order[0], 'drain',
+                         'spawning before the driver drains risks the wedge')
+        self.assertIn('spawn', order)
+        self.assertTrue(popen.call_args[1]['start_new_session'],
+                        'the helper must outlive this process')
+
+
+class UpdateUiTests(unittest.TestCase):
+
+    def setUp(self):
+        here = os.path.dirname(os.path.abspath(__file__))
+        with open(os.path.join(here, 'templates', 'index.html')) as fh:
+            self.src = fh.read()
+
+    def test_banner_and_pill_both_exist(self):
+        self.assertIn('id="update-banner"', self.src)
+        self.assertIn('id="update-pill"', self.src)
+
+    def test_dismissing_the_banner_reveals_the_pill(self):
+        # The offer must survive a dismissal, or it is gone forever.
+        start = self.src.find('function dismissUpdateBanner()')
+        self.assertNotEqual(start, -1, 'dismissUpdateBanner not found')
+        body = self.src[start:self.src.find('function ', start + 10)]
+        self.assertIn("getElementById('update-pill')", body)
+        self.assertIn("classList.add('visible')", body)
+
+    def test_the_frontend_never_supplies_a_download_url(self):
+        # The route takes no parameters; the page must not pretend otherwise.
+        call = re.search(r"fetch\('/api/update/open-download'[^)]*\)", self.src)
+        self.assertIsNotNone(call, 'open-download is never called')
+        self.assertNotIn('body', call.group(0))
+
+    def test_unusable_locations_offer_a_download_instead(self):
+        self.assertIn('installable', self.src)
+        self.assertIn('Descarca', self.src)
+
+    def test_the_file_list_selector_matches_the_real_markup(self):
+        # startUpdate() warns before dropping a queue; a selector that silently
+        # matches nothing would skip the warning and lose the user's files.
+        self.assertIn('id="file-list"', self.src)
+        self.assertIn("className = 'file-item'", self.src)
+        self.assertIn("'#file-list .file-item'", self.src)
+
+
+class PrefsTests(unittest.TestCase):
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+        self.file = os.path.join(self.tmp, 'prefs.json')
+        patcher = mock.patch.object(prefs, 'path',
+                                    return_value=pathlib.Path(self.file))
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def test_missing_file_reads_as_empty(self):
+        self.assertEqual(prefs.load(), {})
+
+    def test_round_trip(self):
+        prefs.set('move_declined', True)
+        self.assertTrue(prefs.get('move_declined'))
+        self.assertEqual(prefs.load(), {'move_declined': True})
+
+    def test_corrupt_file_reads_as_empty(self):
+        # The app must start even if this file is garbage. It holds nothing
+        # worth failing a launch over.
+        with open(self.file, 'w') as fh:
+            fh.write('{not json')
+        self.assertEqual(prefs.load(), {})
+
+    def test_a_json_list_reads_as_empty(self):
+        # Valid JSON, wrong shape - .get() would raise on a list.
+        with open(self.file, 'w') as fh:
+            fh.write('["nope"]')
+        self.assertEqual(prefs.load(), {})
+
+    def test_saving_creates_the_directory(self):
+        nested = os.path.join(self.tmp, 'a', 'b', 'prefs.json')
+        with mock.patch.object(prefs, 'path', return_value=pathlib.Path(nested)):
+            prefs.set('x', 1)
+            self.assertTrue(os.path.exists(nested))
+
+
+class MoveToApplicationsTests(unittest.TestCase):
+
+    def setUp(self):
+        import main as main_module
+        self.main = main_module
+        self.window = mock.Mock()
+
+    def _patches(self, destination, declined=False, translocated=False):
+        return [
+            mock.patch.object(self.main.updater, 'bundle_path',
+                              return_value=pathlib.Path('/x/CEI PDF Signer.app')),
+            mock.patch.object(self.main.updater, 'move_destination',
+                              return_value=destination),
+            mock.patch.object(self.main.updater, 'is_translocated',
+                              return_value=translocated),
+            mock.patch.object(self.main.prefs, 'get', return_value=declined),
+        ]
+
+    def _run(self, patches):
+        for patch in patches:
+            patch.start()
+            self.addCleanup(patch.stop)
+        return self.main.offer_move_to_applications(self.window)
+
+    def test_no_prompt_when_there_is_nowhere_to_move(self):
+        self.assertFalse(self._run(self._patches(None)))
+        self.window.create_confirmation_dialog.assert_not_called()
+
+    def test_no_prompt_after_a_previous_refusal(self):
+        dest = pathlib.Path('/Applications/CEI PDF Signer.app')
+        self.assertFalse(self._run(self._patches(dest, declined=True)))
+        self.window.create_confirmation_dialog.assert_not_called()
+
+    def test_refusing_is_remembered(self):
+        dest = pathlib.Path('/Applications/CEI PDF Signer.app')
+        self.window.create_confirmation_dialog.return_value = False
+        with mock.patch.object(self.main.prefs, 'set') as remember:
+            self.assertFalse(self._run(self._patches(dest)))
+        remember.assert_called_once_with('move_declined', True)
+
+    def test_accepting_moves_and_deletes_the_original(self):
+        dest = pathlib.Path('/Applications/CEI PDF Signer.app')
+        self.window.create_confirmation_dialog.return_value = True
+        with mock.patch.object(self.main, '_quit_and_relaunch') as relaunch:
+            self.assertTrue(self._run(self._patches(dest)))
+        argv = relaunch.call_args[0][0]
+        self.assertEqual(argv[-2], '/x/CEI PDF Signer.app',
+                         'the original must be cleaned up, not left behind')
+
+    def test_a_translocated_app_is_copied_out_before_quitting(self):
+        """The helper runs after we are dead, and the source dies with us.
+
+        macOS tears down the randomized AppTranslocation mount when the
+        process exits. Handing the helper that path means handing it a path
+        that will not exist when it looks: ditto fails, there is no previous
+        install to roll back to, and the user is left with no app at all -
+        in exactly the case this prompt exists for.
+        """
+        dest = pathlib.Path('/Applications/CEI PDF Signer.app')
+        self.window.create_confirmation_dialog.return_value = True
+        with mock.patch.object(self.main.tempfile, 'mkdtemp',
+                               return_value='/tmp/cei-move-x'), \
+             mock.patch.object(self.main.subprocess, 'run') as run, \
+             mock.patch.object(self.main, '_quit_and_relaunch') as relaunch:
+            self.assertTrue(self._run(self._patches(dest, translocated=True)))
+
+        copied = run.call_args[0][0]
+        self.assertEqual(copied[0], 'ditto')
+        self.assertEqual(copied[1], '/x/CEI PDF Signer.app')
+        self.assertEqual(copied[2], '/tmp/cei-move-x/CEI PDF Signer.app')
+
+        argv = relaunch.call_args[0][0]
+        source, cleanup = argv[-4], argv[-2]
+        self.assertEqual(source, '/tmp/cei-move-x/CEI PDF Signer.app',
+                         'the helper must copy from the staged copy')
+        self.assertNotIn('AppTranslocation', source)
+        self.assertEqual(cleanup, '/tmp/cei-move-x',
+                         'the staging dir is what gets cleaned up')
+
+    def test_a_normal_move_is_not_staged(self):
+        # An ordinary directory outlives us, and passing it as its own
+        # cleanup path is what makes this a move rather than a copy.
+        dest = pathlib.Path('/Applications/CEI PDF Signer.app')
+        self.window.create_confirmation_dialog.return_value = True
+        with mock.patch.object(self.main.subprocess, 'run') as run, \
+             mock.patch.object(self.main, '_quit_and_relaunch') as relaunch:
+            self.assertTrue(self._run(self._patches(dest)))
+        run.assert_not_called()
+        argv = relaunch.call_args[0][0]
+        self.assertEqual(argv[-4], '/x/CEI PDF Signer.app')
+        self.assertEqual(argv[-2], '/x/CEI PDF Signer.app')
+
+    def test_an_unwritable_prefs_file_cannot_stop_the_app_starting(self):
+        # This is the first thing start_app does. An exception escaping it
+        # means Flask never starts and the user stares at the loading screen
+        # forever, with no error anywhere.
+        dest = pathlib.Path('/Applications/CEI PDF Signer.app')
+        self.window.create_confirmation_dialog.return_value = False
+        with mock.patch.object(self.main.prefs, 'set',
+                               side_effect=OSError('read-only file system')):
+            self.assertFalse(self._run(self._patches(dest)))
+
+    def test_a_failing_dialog_cannot_stop_the_app_starting(self):
+        dest = pathlib.Path('/Applications/CEI PDF Signer.app')
+        self.window.create_confirmation_dialog.side_effect = RuntimeError('boom')
+        self.assertFalse(self._run(self._patches(dest)))
+
+    def test_a_failing_stage_copy_cannot_stop_the_app_starting(self):
+        dest = pathlib.Path('/Applications/CEI PDF Signer.app')
+        self.window.create_confirmation_dialog.return_value = True
+        with mock.patch.object(self.main.subprocess, 'run',
+                               side_effect=OSError('no space left')), \
+             mock.patch.object(self.main, '_quit_and_relaunch') as relaunch:
+            self.assertFalse(self._run(self._patches(dest, translocated=True)))
+        relaunch.assert_not_called()
+
+
+class HiddenImportsTests(unittest.TestCase):
+    """PyInstaller assembles the bundle from hiddenimports.
+
+    A module reached only at runtime can go missing from the build without
+    anything complaining until a user opens the app - which is why 'app' and
+    'pcsc' are already listed there.
+    """
+
+    def test_runtime_only_modules_are_declared(self):
+        here = os.path.dirname(os.path.abspath(__file__))
+        with open(os.path.join(here, 'CEIPDFSigner.spec')) as fh:
+            spec = fh.read()
+        for module in ('app', 'pcsc', 'updater', 'prefs'):
+            self.assertIn("'%s'," % module, spec,
+                          "%s is not in hiddenimports" % module)
 
 
 if __name__ == '__main__':

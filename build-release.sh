@@ -6,8 +6,12 @@ set -e
 
 cd "$(dirname "$0")"
 
-# Obtine versiunea din tag-ul git (sau foloseste "dev" daca nu exista tag)
-VERSION=$(git describe --tags --abbrev=0 2>/dev/null || echo "dev")
+# Se calculeaza aici si se EXPORTA, ca build.sh sa nu-si calculeze propria
+# versiune. Fara export, numele arhivei venea de aici si versiunea din
+# Info.plist dintr-un `git describe` separat - doua surse care astazi dau
+# acelasi raspuns, dar nimic nu le obliga sa o faca.
+export APP_VERSION="${APP_VERSION:-$(git describe --tags --abbrev=0 2>/dev/null || echo dev)}"
+VERSION="$APP_VERSION"
 
 echo "=== CEI PDF Signer - Release Build ==="
 echo "Versiune: $VERSION"
@@ -136,4 +140,9 @@ echo "ATENTIE: incarca EXACT fisierul $ZIP_NAME generat mai sus."
 echo "Incarca si SHA256SUMS.txt, ca oricine sa poata verifica descarcarea."
 echo "Nu re-arhiva aplicatia cu Finder sau cu alte unelte - se pierd"
 echo "symlink-urile si aplicatia nu mai porneste (issues #4, #6, #7)."
+echo ""
+echo "Daca acest release atinge updater.py, prefs.py sau scriptul de"
+echo "relansare, ruleaza inainte de publicare procedura manuala din"
+echo "scripts/verify-update-manually.md - testele automate nu pot acoperi"
+echo "o aplicatie semnata care se inlocuieste singura in /Applications."
 echo ""

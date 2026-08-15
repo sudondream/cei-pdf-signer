@@ -7,11 +7,13 @@ Run this server and access via browser at http://localhost:5000
 import os
 import sys
 import base64
+import shutil
 import tempfile
 import hashlib
 import subprocess
 import threading
 import time
+import urllib.request
 from datetime import datetime
 from pathlib import Path
 
@@ -21,6 +23,7 @@ from werkzeug.utils import secure_filename
 
 # Reader detection through PCSC.framework, which ships with macOS.
 import pcsc
+import updater
 
 # PKCS#11 imports - python-pkcs11 talks to the card. PyKCS11 used to sit here
 # too; it is gone. Nothing called it after the switch, and its wildcard import
@@ -1056,6 +1059,152 @@ def api_open_external():
     if not url:
         return jsonify({'error': 'Unknown link'}), 400
 
+    subprocess.run(['open', url], check=False)
+    return jsonify({'success': True})
+
+
+# --- Actualizare ------------------------------------------------------------
+#
+# Descarcarea si verificarea se fac aici, pe un fir de fundal. Oprirea
+# procesului NU se face aici: main.py este singurul care stie sa astepte
+# driverul de card inainte sa moara, iar a muri in mijlocul unui apel PKCS#11
+# blocheaza cititorul pentru tot calculatorul pana la repornire.
+class _UpdateState:
+    def __init__(self):
+        self.lock = threading.Lock()
+        self.stage = 'idle'
+        self.percent = 0
+        self.update = None
+        self.installable = False
+        self.error = None
+
+    def snapshot(self):
+        with self.lock:
+            return {
+                'stage': self.stage,
+                'percent': self.percent,
+                'tag': self.update.tag if self.update else None,
+                'installable': self.installable,
+                'error': self.error,
+            }
+
+
+_update_state = _UpdateState()
+_relaunch_handler = None
+
+
+def reset_update_state():
+    """Test helper: forget everything the updater has learned."""
+    global _update_state
+    _update_state = _UpdateState()
+
+
+def set_relaunch_handler(handler):
+    """Register the one function allowed to end the process (see main.py)."""
+    global _relaunch_handler
+    _relaunch_handler = handler
+
+
+def start_update_check():
+    """Ask GitHub whether there is a newer release. Returns the thread."""
+    def run():
+        with _update_state.lock:
+            _update_state.stage = 'checking'
+        found = updater.check(updater.current_release_tag())
+        with _update_state.lock:
+            if found is None:
+                _update_state.stage = 'idle'
+            else:
+                _update_state.update = found
+                _update_state.installable = updater.is_installable(
+                    updater.bundle_path())
+                _update_state.stage = 'available'
+
+    thread = threading.Thread(target=run, daemon=True, name='update-check')
+    thread.start()
+    return thread
+
+
+def _set(stage, percent=None, error=None):
+    with _update_state.lock:
+        _update_state.stage = stage
+        if percent is not None:
+            _update_state.percent = percent
+        _update_state.error = error
+
+
+def _run_update():
+    """Download, verify, and hand main.py the command that installs it."""
+    with _update_state.lock:
+        found = _update_state.update
+    bundle = updater.bundle_path()
+    workdir = tempfile.mkdtemp(prefix='cei-update-')
+    try:
+        _set('downloading', percent=0)
+        archive = os.path.join(workdir, os.path.basename(found.zip_url))
+        updater.download(
+            found.zip_url, archive,
+            progress=lambda done, total: _set(
+                'downloading', percent=int(done * 100 / total) if total else 0))
+
+        _set('verifying', percent=100)
+        sums = urllib.request.urlopen(found.sums_url, timeout=15).read().decode()
+        want = updater.expected_sha(sums, os.path.basename(archive))
+        if not want:
+            raise updater.VerificationError('lipseste suma de control')
+
+        extracted = os.path.join(workdir, 'x')
+        subprocess.run(['ditto', '-x', '-k', archive, extracted], check=True)
+        staged = os.path.join(extracted, os.path.basename(str(bundle)))
+        updater.verify(archive, staged, want, updater.team_identifier(bundle))
+
+        _set('ready')
+        _relaunch_handler(updater.relaunch_command(
+            os.getpid(), staged, str(bundle), workdir))
+    except Exception as error:
+        # Nimic din afara lui workdir nu a fost atins, deci esecul e inert.
+        shutil.rmtree(workdir, ignore_errors=True)
+        _set('failed', error=str(error))
+
+
+@app.route('/api/update/status')
+def api_update_status():
+    return jsonify(_update_state.snapshot())
+
+
+@app.route('/api/update/start', methods=['POST'])
+def api_update_start():
+    with _update_state.lock:
+        # 'failed' este retryabil: o descarcare intrerupta nu inseamna ca
+        # actualizarea a disparut, iar bannerul o ofera in continuare. Fara
+        # asta, un al doilea click raspundea "Nicio actualizare disponibila"
+        # despre exact actualizarea afisata pe ecran.
+        if _update_state.stage not in ('available', 'failed'):
+            return jsonify({'error': 'Actualizarea este deja in curs'}), 409
+        if _update_state.update is None or not _update_state.installable:
+            return jsonify({'error': 'Nicio actualizare disponibila'}), 409
+        if driver_busy():
+            return jsonify({'error': 'Se lucreaza cu cardul'}), 409
+        _update_state.stage = 'downloading'
+        _update_state.percent = 0
+
+    threading.Thread(target=_run_update, daemon=True, name='update-run').start()
+    return jsonify({'success': True})
+
+
+@app.route('/api/update/open-download', methods=['POST'])
+def api_update_open_download():
+    """Open the release page. Takes no parameters, deliberately.
+
+    The URL comes from update state that only a GitHub response ever wrote, so
+    this cannot be turned into an arbitrary-URL opener - the same property
+    /api/open-external has, arrived at by taking no input rather than by
+    checking it.
+    """
+    with _update_state.lock:
+        url = _update_state.update.page_url if _update_state.update else None
+    if not url:
+        return jsonify({'error': 'Nicio actualizare disponibila'}), 400
     subprocess.run(['open', url], check=False)
     return jsonify({'success': True})
 

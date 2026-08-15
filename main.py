@@ -7,6 +7,8 @@ Wraps the Flask web app in a native macOS window using PyWebView
 import sys
 import os
 import signal
+import subprocess
+import tempfile
 import threading
 import socket
 import time
@@ -21,7 +23,10 @@ if getattr(sys, 'frozen', False):
         sys.path.insert(0, resources_dir)
 
 import webview
-from app import app, driver_busy, wait_for_driver
+import prefs
+import updater
+from app import (app, driver_busy, wait_for_driver, set_relaunch_handler,
+                 start_update_check)
 
 
 # Loading screen HTML - shown immediately while Flask starts
@@ -144,6 +149,106 @@ def _on_signal():
     os._exit(0)
 
 
+def _quit_and_relaunch(argv, window=None):
+    """Spawn the installer helper, then quit the same way a close would.
+
+    The order is the point. wait_for_driver() runs first for exactly the reason
+    it runs on a normal close: dying inside a PKCS#11 call strands the Idemia
+    driver for every process on the machine until the Mac is restarted. An
+    update that saves the user a download and costs them a reboot is not a
+    saving.
+
+    start_new_session so the helper survives us - it exists to act after we are
+    gone. os._exit for the same reason the signal handler uses it: SystemExit
+    cannot unwind a main thread parked in Cocoa's event loop.
+    """
+    wait_for_driver()
+    subprocess.Popen(argv, start_new_session=True,
+                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    if window is not None:
+        try:
+            window.destroy()
+        except Exception:
+            pass  # cosmetic; the process is about to end anyway
+    os._exit(0)
+
+
+MOVE_TITLE = 'Muta in Applications'
+MOVE_MESSAGE = (
+    'CEI PDF Signer nu este in folderul Applications.\n\n'
+    'Il mutam acolo si repornim aplicatia? Actualizarile automate '
+    'functioneaza doar din Applications.'
+)
+
+
+def _staged_move_source(bundle):
+    """(source, cleanup) for moving `bundle` into /Applications.
+
+    A translocated app is copied to a temp directory *before* we quit. macOS
+    tears down the randomized AppTranslocation mount when the process exits,
+    and the helper runs only once we are dead - which is the whole point of
+    it. Handing it the translocated path means handing it a path that will
+    not exist by the time it looks: ditto fails, there is no previous install
+    to roll back to, and the user is left with no application at all. That is
+    the exact case this prompt exists to serve, so it is the one case that
+    must not break.
+
+    A normal bundle needs no staging. It is an ordinary directory that
+    outlives us, and passing it as its own cleanup path is what makes this a
+    move rather than a copy.
+    """
+    if not updater.is_translocated(bundle):
+        return str(bundle), str(bundle)
+
+    staging = tempfile.mkdtemp(prefix='cei-move-')
+    staged = os.path.join(staging, bundle.name)
+    subprocess.run(['ditto', str(bundle), staged], check=True)
+    return staged, staging
+
+
+def offer_move_to_applications(window):
+    """Offer to install the app in /Applications. True if we are quitting.
+
+    Never raises. This is the first thing that runs at startup, so anything
+    escaping it - an unwritable preferences file, a full disk, a native dialog
+    that misbehaves - would stop Flask from ever starting and leave the user
+    staring at the loading screen with no error. Moving the app is a
+    convenience; the app starting is not.
+    """
+    try:
+        return _offer_move_to_applications(window)
+    except Exception:
+        return False
+
+
+def _offer_move_to_applications(window):
+    """The actual offer.
+
+    Runs before Flask starts, since there is no sense booting a server we are
+    about to kill.
+
+    The original is deleted after a normal move but left alone after a
+    translocated one: macOS runs a translocated app from a path that does not
+    say where the download came from, and recovering it needs
+    SecTranslocateCreateOriginalPathForURL from Security.framework - a lot of
+    ctypes to buy tidiness.
+    """
+    bundle = updater.bundle_path()
+    destination = updater.move_destination(bundle)
+    if destination is None or prefs.get('move_declined', False):
+        return False
+
+    if not window.create_confirmation_dialog(MOVE_TITLE, MOVE_MESSAGE):
+        prefs.set('move_declined', True)
+        return False
+
+    source, cleanup = _staged_move_source(bundle)
+    _quit_and_relaunch(
+        updater.relaunch_command(os.getpid(), source, str(destination), cleanup),
+        window=window)
+    return True
+
+
 def main():
     # Must happen before any other thread starts, so they inherit the mask.
     signal.pthread_sigmask(signal.SIG_BLOCK, TERMINATING_SIGNALS)
@@ -166,6 +271,12 @@ def main():
 
     def start_app():
         """Start Flask and navigate to it once ready"""
+        # Inainte de orice: daca aplicatia nu e in Applications, oferim mutarea.
+        # Nu are rost sa pornim un server pe care urmeaza sa-l oprim.
+        # offer_move_to_applications nu arunca niciodata - vezi comentariul ei.
+        if offer_move_to_applications(window):
+            return
+
         # Start Flask server in background thread
         server_thread = threading.Thread(target=start_server, args=(port,), daemon=True)
         server_thread.start()
@@ -174,6 +285,10 @@ def main():
         if wait_for_server(port):
             # Navigate to the Flask app
             window.load_url(f'http://127.0.0.1:{port}')
+            # Verificarea actualizarilor porneste dupa ce interfata s-a
+            # incarcat, ca sa nu concureze cu detectia cardului la pornire.
+            time.sleep(2)
+            start_update_check()
         else:
             # Show error if server failed
             window.load_html('''
@@ -206,6 +321,10 @@ def main():
         return False   # cancel this close; finish() closes for real
 
     window.events.closing += on_closing
+
+    # app.py descarca si verifica, dar nu are voie sa opreasca procesul. Aici
+    # este singurul loc care stie sa astepte driverul de card inainte sa moara.
+    set_relaunch_handler(lambda argv: _quit_and_relaunch(argv, window=window))
 
     # Start the GUI - the func runs in a separate thread
     webview.start(
