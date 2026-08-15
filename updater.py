@@ -116,6 +116,15 @@ done
 [ -e "$DEST" ] && { mv "$DEST" "$OLD" || exit 1; }
 
 if ditto "$SRC" "$DEST"; then
+    # ditto copies com.apple.quarantine along with everything else, and macOS
+    # translocates ANY quarantined app - including one sitting in
+    # /Applications. Left on, the installed copy runs from a randomized
+    # read-only mount, never sees itself as installed, and asks to move again
+    # on every launch, forever. Clearing it is what Finder does for a
+    # user-initiated drag to Applications, which is precisely what the user
+    # just agreed to. On the update path the attribute was already proven
+    # absent during verification, so this is a no-op there.
+    xattr -d -r com.apple.quarantine "$DEST" 2>/dev/null
     rm -rf "$OLD"
     [ -n "$CLEANUP" ] && rm -rf "$CLEANUP"
 else
@@ -152,6 +161,56 @@ _TRANSLOCATION_MARKER = '/AppTranslocation/'
 
 def is_translocated(path):
     return _TRANSLOCATION_MARKER in str(path)
+
+
+def _mount_table(run=subprocess.run):
+    return run(['mount'], capture_output=True, text=True).stdout or ''
+
+
+# "/Users/x/Downloads/App.app on /private/var/.../AppTranslocation/UUID (nullfs, ...)"
+_MOUNT_RE = re.compile(r'^(?P<original>.+) on (?P<point>\S.*?) \(nullfs[,)]')
+
+
+def original_path(bundle, run=subprocess.run):
+    """The real path behind a translocated bundle, or None.
+
+    The translocation mount cannot be used as a copy source. It is not
+    reachable from another process - ditto reports "Cannot get the real path
+    for source" and a plain existence check fails - and macOS tears it down
+    the moment the app exits, which is exactly when the installer helper
+    runs. Copying from it produced empty directories and, with nothing to
+    install and no previous bundle to restore, an app that simply vanished.
+
+    macOS publishes the mapping in the mount table:
+
+        /Users/x/Downloads/App.app on /private/var/.../AppTranslocation/UUID (nullfs, ...)
+
+    and the bundle appears under <mountpoint>/d/<name>. Apple's own answer is
+    SecTranslocateCreateOriginalPathForURL from Security.framework; the mount
+    table carries the same fact without hand-written ctypes bindings.
+    """
+    if bundle is None or not is_translocated(bundle):
+        return None
+    # <mountpoint>/d/<name>.app  ->  <mountpoint>
+    point = os.path.realpath(str(pathlib.Path(bundle).parent.parent))
+    for line in _mount_table(run=run).splitlines():
+        match = _MOUNT_RE.match(line)
+        if match and os.path.realpath(match.group('point')) == point:
+            return pathlib.Path(match.group('original'))
+    return None
+
+
+def install_source(bundle):
+    """The path to install *from*, or None if there is nothing usable.
+
+    For a translocated app that is the original download, not the read-only
+    mount we happen to be executing out of.
+    """
+    if bundle is None:
+        return None
+    if not is_translocated(bundle):
+        return bundle
+    return original_path(bundle)
 
 
 def is_installable(path):

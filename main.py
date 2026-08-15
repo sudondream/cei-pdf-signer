@@ -8,7 +8,6 @@ import sys
 import os
 import signal
 import subprocess
-import tempfile
 import threading
 import socket
 import time
@@ -181,31 +180,6 @@ MOVE_MESSAGE = (
 )
 
 
-def _staged_move_source(bundle):
-    """(source, cleanup) for moving `bundle` into /Applications.
-
-    A translocated app is copied to a temp directory *before* we quit. macOS
-    tears down the randomized AppTranslocation mount when the process exits,
-    and the helper runs only once we are dead - which is the whole point of
-    it. Handing it the translocated path means handing it a path that will
-    not exist by the time it looks: ditto fails, there is no previous install
-    to roll back to, and the user is left with no application at all. That is
-    the exact case this prompt exists to serve, so it is the one case that
-    must not break.
-
-    A normal bundle needs no staging. It is an ordinary directory that
-    outlives us, and passing it as its own cleanup path is what makes this a
-    move rather than a copy.
-    """
-    if not updater.is_translocated(bundle):
-        return str(bundle), str(bundle)
-
-    staging = tempfile.mkdtemp(prefix='cei-move-')
-    staged = os.path.join(staging, bundle.name)
-    subprocess.run(['ditto', str(bundle), staged], check=True)
-    return staged, staging
-
-
 def offer_move_to_applications(window):
     """Offer to install the app in /Applications. True if we are quitting.
 
@@ -240,8 +214,18 @@ def _offer_move_to_applications(window):
     if os.environ.get('CEI_SKIP_MOVE_PROMPT'):
         return False
 
-    bundle = updater.bundle_path()
-    destination = updater.move_destination(bundle)
+    # Everything is decided about where the app REALLY lives, not where it
+    # happens to be executing from. A translocated app runs out of a
+    # randomized read-only mount, so the running path answers neither "can I
+    # copy from here" (no - the mount is unreachable from the helper, and
+    # gone once we exit) nor "am I already installed" (it is never under
+    # /Applications, so the app would ask to move itself on every single
+    # launch, forever).
+    source = updater.install_source(updater.bundle_path())
+    if source is None:
+        return False
+
+    destination = updater.move_destination(source)
     if destination is None or prefs.get('move_declined', False):
         return False
 
@@ -249,9 +233,11 @@ def _offer_move_to_applications(window):
         prefs.set('move_declined', True)
         return False
 
-    source, cleanup = _staged_move_source(bundle)
+    # source is also the cleanup path: that is what makes this a move rather
+    # than a copy that leaves the download sitting in Downloads.
     _quit_and_relaunch(
-        updater.relaunch_command(os.getpid(), source, str(destination), cleanup),
+        updater.relaunch_command(os.getpid(), str(source), str(destination),
+                                 str(source)),
         window=window)
     return True
 

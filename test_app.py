@@ -1725,6 +1725,103 @@ class BundleLocationTests(unittest.TestCase):
                 os.chmod(parent, 0o700)   # or TemporaryDirectory cannot clean up
 
 
+# Real `mount` output captured on 2026-08-15 while an app was translocated.
+TRANSLOCATION_MOUNTS = (
+    '/dev/disk3s1s1 on / (apfs, sealed, local, read-only, journaled)\n'
+    '/Users/bancuadrian/Downloads/CEI PDF Signer.app on '
+    '/private/var/folders/2t/wpgn/T/AppTranslocation/DD734CBD-DCD6-4A07-A664-6DAE794BBF82'
+    ' (nullfs, local, nodev, nosuid, read-only, nobrowse, mounted by bancuadrian)\n'
+    '/Applications/CEI PDF Signer.app on '
+    '/private/var/folders/2t/wpgn/T/AppTranslocation/BF1C08E8-97F3-4375-8518-F71B9A16BB9F'
+    ' (nullfs, local, nodev, nosuid, read-only, nobrowse, mounted by bancuadrian)\n'
+)
+
+
+class TranslocationOriginTests(unittest.TestCase):
+    """The running path is unusable; the mount table says where we really are.
+
+    The translocation mount cannot be read by another process (ditto: "Cannot
+    get the real path for source") and macOS unmounts it the instant the app
+    exits - which is exactly when the installer helper runs.
+    """
+
+    def _run(self, output=TRANSLOCATION_MOUNTS):
+        return lambda argv, **kw: subprocess.CompletedProcess(argv, 0, output, '')
+
+    def test_recovers_the_download_behind_a_translocated_path(self):
+        bundle = pathlib.Path(
+            '/private/var/folders/2t/wpgn/T/AppTranslocation/'
+            'DD734CBD-DCD6-4A07-A664-6DAE794BBF82/d/CEI PDF Signer.app')
+        self.assertEqual(
+            updater.original_path(bundle, run=self._run()),
+            pathlib.Path('/Users/bancuadrian/Downloads/CEI PDF Signer.app'))
+
+    def test_recognises_an_installed_app_that_is_being_translocated(self):
+        """The loop this bug caused.
+
+        A quarantined copy in /Applications is still translocated, so the
+        running path is never under /Applications and the app asked to move
+        itself on every launch, forever.
+        """
+        bundle = pathlib.Path(
+            '/private/var/folders/2t/wpgn/T/AppTranslocation/'
+            'BF1C08E8-97F3-4375-8518-F71B9A16BB9F/d/CEI PDF Signer.app')
+        origin = updater.original_path(bundle, run=self._run())
+        self.assertEqual(origin, pathlib.Path('/Applications/CEI PDF Signer.app'))
+        # ...and knowing that, there is nothing to offer.
+        self.assertIsNone(updater.move_destination(origin))
+
+    def test_no_matching_mount_gives_up_rather_than_guessing(self):
+        bundle = pathlib.Path(
+            '/private/var/folders/2t/wpgn/T/AppTranslocation/'
+            'UNKNOWN-UUID/d/CEI PDF Signer.app')
+        self.assertIsNone(updater.original_path(bundle, run=self._run()))
+
+    def test_a_normal_path_has_no_origin_to_recover(self):
+        self.assertIsNone(updater.original_path(
+            pathlib.Path('/Applications/CEI PDF Signer.app'), run=self._run()))
+
+    def test_install_source_prefers_the_original(self):
+        bundle = pathlib.Path(
+            '/private/var/folders/2t/wpgn/T/AppTranslocation/'
+            'DD734CBD-DCD6-4A07-A664-6DAE794BBF82/d/CEI PDF Signer.app')
+        with mock.patch.object(updater, '_mount_table',
+                               return_value=TRANSLOCATION_MOUNTS):
+            source = updater.install_source(bundle)
+        self.assertEqual(source,
+                         pathlib.Path('/Users/bancuadrian/Downloads/CEI PDF Signer.app'))
+        self.assertNotIn('AppTranslocation', str(source))
+
+    def test_install_source_passes_a_normal_bundle_through(self):
+        bundle = pathlib.Path('/Users/x/Downloads/CEI PDF Signer.app')
+        self.assertEqual(updater.install_source(bundle), bundle)
+
+    def test_install_source_is_none_when_unresolvable(self):
+        # Better to stay quiet than to ask a question we cannot act on.
+        bundle = pathlib.Path(
+            '/private/var/folders/2t/wpgn/T/AppTranslocation/'
+            'UNKNOWN/d/CEI PDF Signer.app')
+        with mock.patch.object(updater, '_mount_table',
+                               return_value=TRANSLOCATION_MOUNTS):
+            self.assertIsNone(updater.install_source(bundle))
+
+
+class QuarantineStrippedOnInstallTests(unittest.TestCase):
+
+    def test_the_helper_clears_quarantine_after_installing(self):
+        """Otherwise the installed copy is translocated too, and loops.
+
+        ditto copies com.apple.quarantine along with the bundle, and macOS
+        translocates any quarantined app - /Applications included. Finder
+        clears it on a user-initiated drag; this move is the same act.
+        """
+        script = updater.RELAUNCH_SCRIPT
+        self.assertIn('xattr -d -r com.apple.quarantine "$DEST"', script)
+        self.assertLess(script.index('ditto "$SRC" "$DEST"'),
+                        script.index('xattr -d -r com.apple.quarantine'),
+                        'must run after the copy, not before')
+
+
 class MoveDestinationTests(unittest.TestCase):
     """Each of these must suppress the move prompt on its own."""
 
@@ -2227,14 +2324,15 @@ class MoveToApplicationsTests(unittest.TestCase):
         self.main = main_module
         self.window = mock.Mock()
 
-    def _patches(self, destination, declined=False, translocated=False):
+    def _patches(self, destination, declined=False,
+                 source=pathlib.Path('/x/CEI PDF Signer.app')):
         return [
             mock.patch.object(self.main.updater, 'bundle_path',
                               return_value=pathlib.Path('/x/CEI PDF Signer.app')),
+            mock.patch.object(self.main.updater, 'install_source',
+                              return_value=source),
             mock.patch.object(self.main.updater, 'move_destination',
                               return_value=destination),
-            mock.patch.object(self.main.updater, 'is_translocated',
-                              return_value=translocated),
             mock.patch.object(self.main.prefs, 'get', return_value=declined),
         ]
 
@@ -2282,48 +2380,47 @@ class MoveToApplicationsTests(unittest.TestCase):
         self.assertEqual(argv[-2], '/x/CEI PDF Signer.app',
                          'the original must be cleaned up, not left behind')
 
-    def test_a_translocated_app_is_copied_out_before_quitting(self):
-        """The helper runs after we are dead, and the source dies with us.
+    def test_the_helper_is_given_the_real_path_never_the_translocated_one(self):
+        """The bug: the helper was handed a path that dies with the process.
 
-        macOS tears down the randomized AppTranslocation mount when the
-        process exits. Handing the helper that path means handing it a path
-        that will not exist when it looks: ditto fails, there is no previous
-        install to roll back to, and the user is left with no app at all -
-        in exactly the case this prompt exists for.
+        macOS unmounts the AppTranslocation mount the moment the app exits,
+        and the mount is unreadable from another process anyway. The helper
+        found nothing to copy, had no previous install to restore, and the
+        app disappeared.
         """
         dest = pathlib.Path('/Applications/CEI PDF Signer.app')
+        real = pathlib.Path('/Users/x/Downloads/CEI PDF Signer.app')
         self.window.create_confirmation_dialog.return_value = True
-        with mock.patch.object(self.main.tempfile, 'mkdtemp',
-                               return_value='/tmp/cei-move-x'), \
-             mock.patch.object(self.main.subprocess, 'run') as run, \
-             mock.patch.object(self.main, '_quit_and_relaunch') as relaunch:
-            self.assertTrue(self._run(self._patches(dest, translocated=True)))
-
-        copied = run.call_args[0][0]
-        self.assertEqual(copied[0], 'ditto')
-        self.assertEqual(copied[1], '/x/CEI PDF Signer.app')
-        self.assertEqual(copied[2], '/tmp/cei-move-x/CEI PDF Signer.app')
+        with mock.patch.object(self.main, '_quit_and_relaunch') as relaunch:
+            self.assertTrue(self._run(self._patches(dest, source=real)))
 
         argv = relaunch.call_args[0][0]
         source, cleanup = argv[-4], argv[-2]
-        self.assertEqual(source, '/tmp/cei-move-x/CEI PDF Signer.app',
-                         'the helper must copy from the staged copy')
+        self.assertEqual(source, str(real))
         self.assertNotIn('AppTranslocation', source)
-        self.assertEqual(cleanup, '/tmp/cei-move-x',
-                         'the staging dir is what gets cleaned up')
+        self.assertEqual(cleanup, str(real),
+                         'the original is removed, so this is a move not a copy')
 
-    def test_a_normal_move_is_not_staged(self):
-        # An ordinary directory outlives us, and passing it as its own
-        # cleanup path is what makes this a move rather than a copy.
+    def test_nothing_is_offered_when_the_real_path_cannot_be_found(self):
+        # Better to stay silent than ask a question we cannot act on.
         dest = pathlib.Path('/Applications/CEI PDF Signer.app')
-        self.window.create_confirmation_dialog.return_value = True
-        with mock.patch.object(self.main.subprocess, 'run') as run, \
-             mock.patch.object(self.main, '_quit_and_relaunch') as relaunch:
-            self.assertTrue(self._run(self._patches(dest)))
-        run.assert_not_called()
-        argv = relaunch.call_args[0][0]
-        self.assertEqual(argv[-4], '/x/CEI PDF Signer.app')
-        self.assertEqual(argv[-2], '/x/CEI PDF Signer.app')
+        with mock.patch.object(self.main, '_quit_and_relaunch') as relaunch:
+            self.assertFalse(self._run(self._patches(dest, source=None)))
+        self.window.create_confirmation_dialog.assert_not_called()
+        relaunch.assert_not_called()
+
+    def test_the_destination_is_judged_from_the_real_path(self):
+        """Where the app *is*, not where it happens to be executing.
+
+        Judging from the translocated path meant an installed app never
+        looked installed, so it asked to move itself on every launch.
+        """
+        real = pathlib.Path('/Applications/CEI PDF Signer.app')
+        patches = self._patches(None, source=real)
+        with mock.patch.object(self.main, '_quit_and_relaunch') as relaunch:
+            self.assertFalse(self._run(patches))
+        self.window.create_confirmation_dialog.assert_not_called()
+        relaunch.assert_not_called()
 
     def test_an_unwritable_prefs_file_cannot_stop_the_app_starting(self):
         # This is the first thing start_app does. An exception escaping it
@@ -2340,13 +2437,16 @@ class MoveToApplicationsTests(unittest.TestCase):
         self.window.create_confirmation_dialog.side_effect = RuntimeError('boom')
         self.assertFalse(self._run(self._patches(dest)))
 
-    def test_a_failing_stage_copy_cannot_stop_the_app_starting(self):
-        dest = pathlib.Path('/Applications/CEI PDF Signer.app')
-        self.window.create_confirmation_dialog.return_value = True
-        with mock.patch.object(self.main.subprocess, 'run',
-                               side_effect=OSError('no space left')), \
+    def test_a_failure_resolving_the_real_path_cannot_stop_the_app_starting(self):
+        # install_source shells out to `mount`. If that goes wrong the app
+        # still has to start.
+        with mock.patch.object(self.main.updater, 'bundle_path',
+                               return_value=pathlib.Path('/x/CEI PDF Signer.app')), \
+             mock.patch.object(self.main.updater, 'install_source',
+                               side_effect=OSError('mount blew up')), \
              mock.patch.object(self.main, '_quit_and_relaunch') as relaunch:
-            self.assertFalse(self._run(self._patches(dest, translocated=True)))
+            self.assertFalse(
+                self.main.offer_move_to_applications(self.window))
         relaunch.assert_not_called()
 
 

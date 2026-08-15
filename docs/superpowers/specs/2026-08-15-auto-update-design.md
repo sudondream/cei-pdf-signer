@@ -342,14 +342,45 @@ straight out of `Downloads` runs from a read-only randomized path under
 `/private/var/folders/.../AppTranslocation/`, and that path does not say where the
 original came from.
 
-**Chosen:** copy the running bundle into `/Applications`, launch that, leave the
-original where it is. The translocated bundle is a complete, readable, signed copy —
-copying *it* produces a correct installation.
+**Corrected after v0.14-beta shipped broken.** The original design said to copy the
+running bundle into `/Applications` and leave the original alone, treating the
+translocated path as a complete readable copy and the original as a mere tidiness
+problem. Both halves were wrong, and together they made the feature fail in its
+primary case.
 
-Rejected: recovering the original path via `SecTranslocateCreateOriginalPathForURL`
-from Security.framework, which is what LetsMove does. It means hand-written ctypes
-bindings and CFURL marshalling to solve a tidiness problem — the cost is a leftover
-app in `Downloads`, sitting next to the ZIP the user still has anyway.
+The translocation mount is **not a usable copy source**. It is unreachable from
+another process — `ditto` reports `Cannot get the real path for source`, and even
+`[ -d ]` fails — and macOS unmounts it the instant the app exits, which is precisely
+when the installer helper runs. Every staged copy came out as an empty directory, so
+the helper had nothing to install and no previous bundle to restore, and the app
+disappeared.
+
+And a quarantined bundle **stays quarantined through the copy**, so the installed
+copy in `/Applications` was itself translocated on every launch. It never saw itself
+as installed and asked to move again, forever.
+
+**Chosen:** resolve the real path first, and clear quarantine after installing.
+
+macOS publishes the mapping in the mount table:
+
+```
+/Users/x/Downloads/App.app on /private/var/.../AppTranslocation/UUID (nullfs, ...)
+```
+
+with the bundle at `<mountpoint>/d/<name>`. That is the same fact
+`SecTranslocateCreateOriginalPathForURL` returns, without hand-written ctypes. The
+original is then used for everything: as the copy source (readable, and it outlives
+us), as the cleanup path (so this is a move, not a copy that litters `Downloads`),
+and — most importantly — as the input to the already-installed check, so an app
+running translocated *out of `/Applications`* is correctly recognised as installed.
+
+Clearing `com.apple.quarantine` on the installed copy is what Finder does for a
+user-initiated drag to Applications, which is exactly what the user just agreed to.
+On the update path the attribute was already proven absent during verification, so
+the same line is a no-op there.
+
+If the original cannot be resolved, no prompt is shown at all — better silence than a
+question we cannot act on.
 
 **"Don't ask again" needs a Python-side file.** The existing `pkcs11_path` preference
 lives in the webview's `localStorage` (`templates/index.html:1227`), which Python
