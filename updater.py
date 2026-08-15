@@ -37,6 +37,20 @@ def numeric_version(tag):
     return '.'.join(str(part) for part in parsed) if parsed else '0.0.0'
 
 
+def display_version(tag):
+    """What macOS shows in the About panel: the tag, minus the leading 'v'.
+
+    CFBundleVersion has to be dotted integers, but CFBundleShortVersionString
+    is the human-facing one and Developer ID distribution does not enforce a
+    shape on it. Using the numeric form for both gave "Version 0.14.0 (0.14.0)"
+    - redundant, and it threw away the part that says this is a beta.
+    """
+    parsed = parse_version(tag)
+    if parsed is None:
+        return tag or 'dev'
+    return tag[1:] if tag.startswith('v') else tag
+
+
 def is_newer(latest_tag, current_tag):
     """Whether latest_tag supersedes current_tag.
 

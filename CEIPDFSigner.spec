@@ -25,7 +25,7 @@ ENTITLEMENTS = os.path.join(os.getcwd(), 'entitlements.plist') if SIGN_IDENTITY 
 # actualizarilor. numeric_version() se importa din updater.py ca sa nu existe
 # doua definitii care pot devia una de alta.
 sys.path.insert(0, os.getcwd())
-from updater import numeric_version
+from updater import numeric_version, display_version
 
 APP_VERSION = os.environ.get('APP_VERSION') or 'dev'
 
@@ -166,8 +166,11 @@ app = BUNDLE(
     info_plist={
         'CFBundleName': 'CEI PDF Signer',
         'CFBundleDisplayName': 'CEI PDF Signer',
+        # Apple vrea numere aici. Panoul "Despre" al macOS il arata in paranteze.
         'CFBundleVersion': numeric_version(APP_VERSION),
-        'CFBundleShortVersionString': numeric_version(APP_VERSION),
+        # Asta e ce vede omul: "Version 0.14-beta (0.14.0)". Numeric in ambele
+        # dadea "Version 0.14.0 (0.14.0)" - redundant, si arunca "beta".
+        'CFBundleShortVersionString': display_version(APP_VERSION),
         # Tag-ul neatins. Apple vrea numere in cheile de mai sus, noi vrem
         # 'v0.13-beta' ca sa comparam cu ce raporteaza GitHub.
         'CEIReleaseTag': APP_VERSION,

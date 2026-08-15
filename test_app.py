@@ -1542,6 +1542,14 @@ class VersionParsingTests(unittest.TestCase):
         self.assertEqual(updater.numeric_version('v0.13-beta'), '0.13.0')
         self.assertEqual(updater.numeric_version('dev'), '0.0.0')
 
+    def test_display_version_keeps_the_beta_for_the_about_panel(self):
+        # macOS shows "Version <short> (<CFBundleVersion>)". Numeric in both
+        # gave "Version 0.14.0 (0.14.0)" - redundant, and lost the beta.
+        self.assertEqual(updater.display_version('v0.14-beta'), '0.14-beta')
+        self.assertEqual(updater.display_version('0.14-beta'), '0.14-beta')
+        self.assertEqual(updater.display_version('dev'), 'dev')
+        self.assertEqual(updater.display_version(''), 'dev')
+
 
 class CurrentVersionTests(unittest.TestCase):
 
