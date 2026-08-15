@@ -1045,6 +1045,8 @@
     <div class="header">
         <h1>CEI PDF Signer</h1>
         <div class="header-status">
+            <span id="install-pill" class="update-pill" onclick="moveToApplications()"
+                  title="Automatic updates only work from Applications">↑ Move to Applications</span>
             <span id="update-pill" class="update-pill" onclick="startUpdate()"></span>
             <span id="pkcs11-warning" class="pkcs11-warning" onclick="openSettings()" title="Click to configure the PKCS#11 library path">
                 <span>&#9888;</span><span id="pkcs11-warning-text">PKCS#11 not found</span>
@@ -2352,6 +2354,39 @@
         }
 
         // Initialize - all operations run independently
+        // --- Mutarea in Applications -------------------------------------
+        //
+        // Dialogul de la pornire este o intrebare pusa o singura data, iar un
+        // "nu" o inchidea definitiv: singura cale inapoi era stergerea unui
+        // fisier de preferinte despre care nimeni nu stie. Pastila asta este
+        // acolo cat timp aplicatia nu e instalata, deci refuzul amana in loc
+        // sa anuleze.
+        async function checkInstallLocation() {
+            try {
+                const status = await (await fetch('/api/install/status')).json();
+                document.getElementById('install-pill')
+                    .classList.toggle('visible', !!status.can_move);
+            } catch (e) {
+                // Nu are voie sa strice nimic vizibil.
+            }
+        }
+
+        async function moveToApplications() {
+            const screen = document.getElementById('update-screen');
+            document.getElementById('update-screen-text').textContent =
+                'Moving to Applications...';
+            document.getElementById('update-progress-bar').style.width = '100%';
+            screen.classList.remove('hidden');
+
+            const response = await fetch('/api/install/move', {method: 'POST'});
+            if (!response.ok) {
+                screen.classList.add('hidden');
+                const body = await response.json();
+                alert(body.error || 'The app could not be moved right now.');
+            }
+            // La succes aplicatia se inchide si se redeschide din Applications.
+        }
+
         // --- Actualizare ------------------------------------------------
         let updateInfo = null;
         let updateBannerDismissed = false;
@@ -2478,6 +2513,7 @@
 
             // Verificarea porneste in Python la 2 secunde dupa incarcare.
             setTimeout(checkForUpdate, 2500);
+            checkInstallLocation();
         };
 
         // Click status badge to manually retry detection

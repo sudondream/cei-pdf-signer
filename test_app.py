@@ -2092,6 +2092,88 @@ class VerifyTests(unittest.TestCase):
         self.assertEqual(seen, [])
 
 
+class InstallLocationTests(unittest.TestCase):
+    """Declining the startup prompt must postpone, not foreclose.
+
+    It wrote move_declined=true and the only way back was deleting a
+    preferences file nobody knows exists. A user who dismissed the prompt to
+    escape a loop lost the feature permanently.
+    """
+
+    def setUp(self):
+        app_module.app.config['TESTING'] = True
+        self.client = app_module.app.test_client()
+
+    def test_offers_the_move_while_the_app_is_outside_applications(self):
+        real = pathlib.Path('/Users/x/Downloads/CEI PDF Signer.app')
+        dest = pathlib.Path('/Applications/CEI PDF Signer.app')
+        with mock.patch.object(app_module.updater, 'install_source', return_value=real), \
+             mock.patch.object(app_module.updater, 'move_destination', return_value=dest):
+            body = self.client.get('/api/install/status').get_json()
+        self.assertTrue(body['can_move'])
+        self.assertEqual(body['destination'], str(dest))
+
+    def test_offers_nothing_once_installed(self):
+        with mock.patch.object(app_module.updater, 'install_source',
+                               return_value=pathlib.Path('/Applications/CEI PDF Signer.app')), \
+             mock.patch.object(app_module.updater, 'move_destination', return_value=None):
+            body = self.client.get('/api/install/status').get_json()
+        self.assertFalse(body['can_move'])
+
+    def test_offers_nothing_when_the_real_path_is_unknown(self):
+        with mock.patch.object(app_module.updater, 'install_source', return_value=None):
+            body = self.client.get('/api/install/status').get_json()
+        self.assertFalse(body['can_move'])
+
+    def test_asking_explicitly_clears_an_earlier_refusal(self):
+        real = pathlib.Path('/Users/x/Downloads/CEI PDF Signer.app')
+        dest = pathlib.Path('/Applications/CEI PDF Signer.app')
+        with mock.patch.object(app_module.updater, 'install_source', return_value=real), \
+             mock.patch.object(app_module.updater, 'move_destination', return_value=dest), \
+             mock.patch.object(app_module, 'driver_busy', return_value=False), \
+             mock.patch.object(app_module.prefs, 'set') as remember, \
+             mock.patch.object(app_module, '_relaunch_handler', lambda argv: None):
+            resp = self.client.post('/api/install/move')
+        self.assertEqual(resp.status_code, 200)
+        remember.assert_called_once_with('move_declined', False)
+
+    def test_the_move_passes_the_real_path_as_source_and_cleanup(self):
+        real = pathlib.Path('/Users/x/Downloads/CEI PDF Signer.app')
+        dest = pathlib.Path('/Applications/CEI PDF Signer.app')
+        seen = []
+        with mock.patch.object(app_module.updater, 'install_source', return_value=real), \
+             mock.patch.object(app_module.updater, 'move_destination', return_value=dest), \
+             mock.patch.object(app_module, 'driver_busy', return_value=False), \
+             mock.patch.object(app_module.prefs, 'set'), \
+             mock.patch.object(app_module, '_relaunch_handler', seen.append):
+            self.client.post('/api/install/move')
+        for _ in range(50):
+            if seen:
+                break
+            time.sleep(0.05)
+        self.assertTrue(seen, 'the relaunch handler was never called')
+        argv = seen[0]
+        self.assertEqual(argv[-4], str(real))
+        self.assertEqual(argv[-3], str(dest))
+        self.assertEqual(argv[-2], str(real))
+
+    def test_the_move_waits_for_the_card(self):
+        real = pathlib.Path('/Users/x/Downloads/CEI PDF Signer.app')
+        dest = pathlib.Path('/Applications/CEI PDF Signer.app')
+        with mock.patch.object(app_module.updater, 'install_source', return_value=real), \
+             mock.patch.object(app_module.updater, 'move_destination', return_value=dest), \
+             mock.patch.object(app_module, 'driver_busy', return_value=True):
+            self.assertEqual(self.client.post('/api/install/move').status_code, 409)
+
+    def test_the_pill_exists_and_is_wired_up(self):
+        here = os.path.dirname(os.path.abspath(__file__))
+        with open(os.path.join(here, 'templates', 'index.html')) as fh:
+            src = fh.read()
+        self.assertIn('id="install-pill"', src)
+        self.assertIn('moveToApplications()', src)
+        self.assertIn("fetch('/api/install/move'", src)
+
+
 class UpdateStatusTests(unittest.TestCase):
 
     def setUp(self):

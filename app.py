@@ -23,6 +23,7 @@ from werkzeug.utils import secure_filename
 
 # Reader detection through PCSC.framework, which ships with macOS.
 import pcsc
+import prefs
 import updater
 
 # PKCS#11 imports - python-pkcs11 talks to the card. PyKCS11 used to sit here
@@ -1165,6 +1166,57 @@ def _run_update():
         # Nimic din afara lui workdir nu a fost atins, deci esecul e inert.
         shutil.rmtree(workdir, ignore_errors=True)
         _set('failed', error=str(error))
+
+
+def move_offer():
+    """(source, destination) if the app could still be installed, else None.
+
+    Judged from where the app really lives, not where it is executing: a
+    translocated app runs from a read-only mount that is never under
+    /Applications.
+    """
+    source = updater.install_source(updater.bundle_path())
+    if source is None:
+        return None
+    destination = updater.move_destination(source)
+    if destination is None:
+        return None
+    return source, destination
+
+
+@app.route('/api/install/status')
+def api_install_status():
+    """Whether the app is still sitting outside /Applications.
+
+    The startup prompt is a one-time question, and answering "no" used to end
+    the matter permanently - the only way back was deleting a preferences
+    file nobody knows about. This backs a button that is always there while
+    the app is not installed, so declining postpones rather than forecloses.
+    """
+    offer = move_offer()
+    return jsonify({'can_move': offer is not None,
+                    'destination': str(offer[1]) if offer else None})
+
+
+@app.route('/api/install/move', methods=['POST'])
+def api_install_move():
+    offer = move_offer()
+    if offer is None:
+        return jsonify({'error': 'Nothing to move'}), 409
+    if driver_busy():
+        return jsonify({'error': 'Busy with the card - try again in a moment'}), 409
+
+    source, destination = offer
+    # Asking for it explicitly overrides an earlier "do not ask again".
+    prefs.set('move_declined', False)
+
+    argv = updater.relaunch_command(os.getpid(), str(source), str(destination),
+                                    str(source))
+    # In a thread, so this response is actually delivered: the handler ends
+    # the process.
+    threading.Thread(target=lambda: _relaunch_handler(argv), daemon=True,
+                     name='install-move').start()
+    return jsonify({'success': True})
 
 
 @app.route('/api/update/status')
