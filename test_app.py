@@ -2164,7 +2164,14 @@ class UpdateUiTests(unittest.TestCase):
 
     def test_unusable_locations_offer_a_download_instead(self):
         self.assertIn('installable', self.src)
-        self.assertIn('Descarca', self.src)
+        self.assertIn("'Update' : 'Download'", self.src)
+
+    def test_the_update_ui_speaks_the_same_language_as_the_app(self):
+        # The interface is English throughout ("PDF Files", "Sign Files").
+        # These strings sit in the same window, so they match it.
+        for phrase in ('Version ', ' is available', 'Downloading update',
+                       'Verifying signature', 'Restarting', 'Update failed'):
+            self.assertIn(phrase, self.src, phrase)
 
     def test_the_file_list_selector_matches_the_real_markup(self):
         # startUpdate() warns before dropping a queue; a selector that silently
@@ -2236,6 +2243,19 @@ class MoveToApplicationsTests(unittest.TestCase):
             patch.start()
             self.addCleanup(patch.stop)
         return self.main.offer_move_to_applications(self.window)
+
+    def test_the_prompt_can_be_suppressed_for_automation(self):
+        """The dialog is modal and native, so nothing headless can get past it.
+
+        Without this, the release smoke test in verify-release-archive.sh
+        hangs forever: it runs the app from a temp dir, the offer appears, and
+        no one is there to click it. Flask never starts and the check fails
+        with no output at all.
+        """
+        dest = pathlib.Path('/Applications/CEI PDF Signer.app')
+        with mock.patch.dict(self.main.os.environ, {'CEI_SKIP_MOVE_PROMPT': '1'}):
+            self.assertFalse(self._run(self._patches(dest)))
+        self.window.create_confirmation_dialog.assert_not_called()
 
     def test_no_prompt_when_there_is_nowhere_to_move(self):
         self.assertFalse(self._run(self._patches(None)))

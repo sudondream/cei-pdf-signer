@@ -1151,7 +1151,7 @@ def _run_update():
         sums = urllib.request.urlopen(found.sums_url, timeout=15).read().decode()
         want = updater.expected_sha(sums, os.path.basename(archive))
         if not want:
-            raise updater.VerificationError('lipseste suma de control')
+            raise updater.VerificationError('checksum missing from SHA256SUMS.txt')
 
         extracted = os.path.join(workdir, 'x')
         subprocess.run(['ditto', '-x', '-k', archive, extracted], check=True)
@@ -1180,11 +1180,11 @@ def api_update_start():
         # asta, un al doilea click raspundea "Nicio actualizare disponibila"
         # despre exact actualizarea afisata pe ecran.
         if _update_state.stage not in ('available', 'failed'):
-            return jsonify({'error': 'Actualizarea este deja in curs'}), 409
+            return jsonify({'error': 'An update is already in progress'}), 409
         if _update_state.update is None or not _update_state.installable:
-            return jsonify({'error': 'Nicio actualizare disponibila'}), 409
+            return jsonify({'error': 'No update available'}), 409
         if driver_busy():
-            return jsonify({'error': 'Se lucreaza cu cardul'}), 409
+            return jsonify({'error': 'Busy with the card - try again in a moment'}), 409
         _update_state.stage = 'downloading'
         _update_state.percent = 0
 
@@ -1204,7 +1204,7 @@ def api_update_open_download():
     with _update_state.lock:
         url = _update_state.update.page_url if _update_state.update else None
     if not url:
-        return jsonify({'error': 'Nicio actualizare disponibila'}), 400
+        return jsonify({'error': 'No update available'}), 400
     subprocess.run(['open', url], check=False)
     return jsonify({'success': True})
 

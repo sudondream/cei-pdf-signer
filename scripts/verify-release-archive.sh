@@ -207,7 +207,10 @@ if [ ! -x "$EXECUTABLE" ]; then
     FAILURES=$((FAILURES + 1))
 else
     LOG="$TMP/smoke.log"
-    "$EXECUTABLE" >"$LOG" 2>&1 &
+    # Fara asta, aplicatia se opreste in dialogul nativ "Muta in Applications"
+    # (rulam dintr-un director temporar, deci oferta apare) si nu are cine sa
+    # apese - Flask nu mai porneste niciodata si testul pica fara output.
+    CEI_SKIP_MOVE_PROMPT=1 "$EXECUTABLE" >"$LOG" 2>&1 &
     PID=$!
 
     STARTED=0

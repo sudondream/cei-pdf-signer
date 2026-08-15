@@ -343,23 +343,23 @@ def verify(zip_path, bundle, want_sha, want_team, run=subprocess.run):
     project's Developer ID and notarized by Apple.
     """
     if sha256(zip_path) != want_sha:
-        raise VerificationError('suma de control nu corespunde')
+        raise VerificationError('checksum does not match')
 
     if run(['codesign', '--verify', '--deep', '--strict', str(bundle)],
            capture_output=True, text=True).returncode != 0:
-        raise VerificationError('semnatura este invalida')
+        raise VerificationError('invalid code signature')
 
     found_team = team_identifier(bundle, run=run)
     if not want_team or not found_team or found_team != want_team:
         raise VerificationError(
-            'semnat de alta echipa: %s' % (found_team or 'nesemnat',))
+            'signed by a different team: %s' % (found_team or 'unsigned',))
 
     if run(['spctl', '-a', '-t', 'exec', str(bundle)],
            capture_output=True, text=True).returncode != 0:
-        raise VerificationError('aplicatia nu este notarizata')
+        raise VerificationError('application is not notarized')
 
     # We fetch with Python, so LaunchServices never stamps this. Its presence
     # means something we do not understand happened; assert rather than strip.
     attrs = run(['xattr', str(bundle)], capture_output=True, text=True).stdout
     if 'com.apple.quarantine' in (attrs or ''):
-        raise VerificationError('descarcarea este marcata ca fiind din internet')
+        raise VerificationError('download is flagged as coming from the internet')

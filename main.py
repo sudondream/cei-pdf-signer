@@ -173,11 +173,11 @@ def _quit_and_relaunch(argv, window=None):
     os._exit(0)
 
 
-MOVE_TITLE = 'Muta in Applications'
+MOVE_TITLE = 'Move to Applications'
 MOVE_MESSAGE = (
-    'CEI PDF Signer nu este in folderul Applications.\n\n'
-    'Il mutam acolo si repornim aplicatia? Actualizarile automate '
-    'functioneaza doar din Applications.'
+    'CEI PDF Signer is not in your Applications folder.\n\n'
+    'Move it there and restart? Automatic updates only work from '
+    'Applications.'
 )
 
 
@@ -233,6 +233,13 @@ def _offer_move_to_applications(window):
     SecTranslocateCreateOriginalPathForURL from Security.framework - a lot of
     ctypes to buy tidiness.
     """
+    # Iesire pentru automatizari. Dialogul este modal si nativ: orice ruleaza
+    # aplicatia fara om in fata (smoke testul din verify-release-archive.sh,
+    # CI, scripturi) se blocheaza in el inainte ca Flask sa porneasca, si nu
+    # are cine sa apese. Vezi CEI_SKIP_MOVE_PROMPT in scripts/.
+    if os.environ.get('CEI_SKIP_MOVE_PROMPT'):
+        return False
+
     bundle = updater.bundle_path()
     destination = updater.move_destination(bundle)
     if destination is None or prefs.get('move_declined', False):
