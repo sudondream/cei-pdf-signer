@@ -11,6 +11,7 @@ These cover the two defects that produced "0 of 3 signed, empty zip":
 
 No smart card required.
 """
+import ast
 import ctypes
 import os
 import pathlib
@@ -1234,9 +1235,15 @@ class MainWiringTests(unittest.TestCase):
             return fh.read()
 
     def test_everything_main_imports_from_app_exists(self):
-        imported = re.findall(r'^from app import (.+)$', self._main_source(), re.MULTILINE)
-        self.assertTrue(imported, "main.py no longer imports from app")
-        names = [n.strip() for line in imported for n in line.split(',')]
+        # ast rather than a regex: the import list is long enough to be
+        # wrapped in parentheses across lines, which a line-based pattern
+        # reads as the name '(app'.
+        tree = ast.parse(self._main_source())
+        names = [alias.name
+                 for node in ast.walk(tree)
+                 if isinstance(node, ast.ImportFrom) and node.module == 'app'
+                 for alias in node.names]
+        self.assertTrue(names, "main.py no longer imports from app")
         for name in names:
             self.assertTrue(hasattr(app_module, name),
                             f"main.py imports {name!r} from app, which does not define it")
